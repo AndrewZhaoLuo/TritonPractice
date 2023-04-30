@@ -242,9 +242,8 @@ def transformer_gated_linear_forward(input_tensor: torch.Tensor, weight_tensor: 
         # print("Autotuned best:", result.metadata)
     return output_tensor
 
-if __name__ == "__main__":
-    torch.manual_seed(0)
 
+def run_test_case_forward():
     M = [312, 512, 761, 1000]
     two_N = [312, 512]
     K = [i for i in range(761, 761 + 65)]
@@ -270,3 +269,19 @@ if __name__ == "__main__":
             print("Torch")
             print(expected_torch_output)
         print()
+        
+if __name__ == "__main__":
+    import argparse
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--seed", type=int, default=None)
+    parser.add_argument("--test-case", choices=['forward', 'backward'], default='forward')
+    args = parser.parse_args()
+    
+    if args.seed is not None:
+        torch.manual_seed(args.seed)
+    
+    if args.test_case == 'forward':
+        run_test_case_forward()
+    else:
+        pass 
+
