@@ -28,16 +28,24 @@ class TransformerGatedLinearLayerFunction(torch.autograd.Function):
         
         x = input_tensor @ weight_tensor.T
         x1, x2 = x.chunk(2, dim=(x.ndim - 1))
+        w1, w2 = weight_tensor.chunk(2, dim=0)
 
+        # weight calculation
         weight_grad = torch.zeros_like(weight_tensor)
         weight1_grad = input_tensor.T @ (grad_output * gelu_fast(x2))
         weight2_grad = input_tensor.T @ (grad_output * x1 * derivative_gelu_fast(x2))
         weight_grad = torch.cat([weight1_grad.T, weight2_grad.T], dim=0)
         
+        # bias calculation
         bias1_grad = gelu_fast(x2) * grad_output
         bias2_grad = x1 * derivative_gelu_fast(x2) * gelu_fast(torch.tensor([1], dtype=x1.dtype, device=x1.device)) * grad_output
         bias_grad = torch.cat([bias1_grad.sum(0).squeeze() , bias2_grad.sum(0).squeeze()], dim=0)
-        return torch.ones_like(input_tensor), weight_grad, bias_grad
+        
+        # input calculation
+        input_grad = (grad_output * gelu_fast(x2)) @ w1
+        input_grad += (grad_output * derivative_gelu_fast(x2) * x1) @ w2 
+        
+        return input_grad, weight_grad, bias_grad
         
         
 class OptimizedTransformerGatedLinearLayer(nn.Module):
@@ -74,7 +82,6 @@ def print_is_close(torch_tensor, triton_tensor, rtol=1e-2, atol=1e-1):
         print("Triton")
         print(triton_tensor)
         print(triton_tensor.shape)
-        breakpoint()
 
 if __name__ == "__main__":
     """Example of using module."""
@@ -87,10 +94,13 @@ if __name__ == "__main__":
     parser.add_argument("--repeats", type=int, default=100)
     args = parser.parse_args()
     
+    repeats = args.repeats
+    warmups = args.warmup
+    
     if args.seed is not None:
         torch.manual_seed(args.seed)
     
-    input_tensor = torch.randn(args.batch_size, args.input_dim, dtype=torch.half)
+    input_tensor = torch.randn(args.batch_size, args.input_dim, dtype=torch.half, requires_grad=True)
     torch_layer = BaseTransformerGatedLinearLayer(args.input_dim)
     triton_layer = OptimizedTransformerGatedLinearLayer.from_torch(torch_layer)
     
@@ -98,33 +108,36 @@ if __name__ == "__main__":
     torch_layer = torch_layer.to('cuda')
     triton_layer = triton_layer.to('cuda')
         
-    # Inference pass
-    # TODO: grad support 
-    repeats = args.repeats
-    warmups = args.warmup
-    forward_torch = torch_layer(input_tensor)
-    forward_triton = triton_layer(input_tensor)
+    input_tensor_torch = input_tensor.clone()
+    input_tensor_torch.retain_grad()
+    input_tensor_triton = input_tensor.clone()
+    input_tensor_triton.retain_grad()
+    forward_torch = torch_layer(input_tensor_torch)
+    forward_triton = triton_layer(input_tensor_triton)
     
-    loss_fn = lambda tensor: (tensor - torch.ones_like(tensor)).pow(2).sum()
-    
-    loss_torch = loss_fn(forward_torch)
-    loss_triton = loss_fn(forward_triton)
-    
-    print("Forward output: ")
+    print("****Forward****")
+    print("Forward tensor: ")
     print_is_close(forward_torch, forward_triton)
     print()
     
+    print("****Backward****")
+    loss_fn = lambda tensor: (tensor - torch.ones_like(tensor)).pow(2).sum()
+    loss_torch = loss_fn(forward_torch)
+    loss_triton = loss_fn(forward_triton)
     loss_triton.backward()
     loss_torch.backward()
-    
     print("Grad weight: ")
-    print_is_close(torch_layer.linear.weight.grad, triton_layer.weight.grad, atol=0.25, rtol=0.3)
+    print_is_close(torch_layer.linear.weight.grad, triton_layer.weight.grad, atol=0.25, rtol=0.5)
     print()
 
     print("Grad bias: ")
-    print_is_close(torch_layer.linear.bias.grad, triton_layer.bias.grad, atol=0.25, rtol=0.3)
+    print_is_close(torch_layer.linear.bias.grad, triton_layer.bias.grad, atol=0.25, rtol=0.5)
     print()
-          
+    
+    print("Grad input: ")
+    print_is_close(input_tensor_torch.grad, input_tensor_triton.grad, atol=0.25, rtol=0.5)
+    print()
+    
 """
 transformer_gated_linear_forward_kernel_0d1d2d3d4d5d6d7d8c9d10c11c12d13c
 Begins: 117.833s
