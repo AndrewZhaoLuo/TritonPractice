@@ -53,6 +53,63 @@ class KernelLaunchParameters(NamedTuple):
     block_size_k: int 
     group_size_m: int
 
+@triton.autotune(
+    configs=[
+        triton.Config({'BLOCK_SIZE_M': 128, 'BLOCK_SIZE_N': 256, 'BLOCK_SIZE_K': 64, 'GROUP_SIZE_M': 8}, num_stages=3, num_warps=8),
+        triton.Config({'BLOCK_SIZE_M': 64, 'BLOCK_SIZE_N': 256, 'BLOCK_SIZE_K': 32, 'GROUP_SIZE_M': 8}, num_stages=4, num_warps=4),
+        triton.Config({'BLOCK_SIZE_M': 128, 'BLOCK_SIZE_N': 128, 'BLOCK_SIZE_K': 32, 'GROUP_SIZE_M': 8}, num_stages=4, num_warps=4),
+        triton.Config({'BLOCK_SIZE_M': 128, 'BLOCK_SIZE_N': 64, 'BLOCK_SIZE_K': 32, 'GROUP_SIZE_M': 8}, num_stages=4, num_warps=4),
+        triton.Config({'BLOCK_SIZE_M': 64, 'BLOCK_SIZE_N': 128, 'BLOCK_SIZE_K': 32, 'GROUP_SIZE_M': 8}, num_stages=4, num_warps=4),
+        triton.Config({'BLOCK_SIZE_M': 128, 'BLOCK_SIZE_N': 32, 'BLOCK_SIZE_K': 32, 'GROUP_SIZE_M': 8}, num_stages=4, num_warps=4),
+        triton.Config({'BLOCK_SIZE_M': 64, 'BLOCK_SIZE_N': 32, 'BLOCK_SIZE_K': 32, 'GROUP_SIZE_M': 8}, num_stages=5, num_warps=2),
+        triton.Config({'BLOCK_SIZE_M': 32, 'BLOCK_SIZE_N': 64, 'BLOCK_SIZE_K': 32, 'GROUP_SIZE_M': 8}, num_stages=5, num_warps=2),
+    ],
+    key=['M', 'two_N', 'K'],
+)
+@triton.jit 
+def transformer_gated_linear_forward_kernel_autotuned(
+    in_ptr, 
+    weight_ptr,
+    bias_ptr,
+    out_ptr,
+    # Matrix dimensions
+    M, 
+    two_N,
+    K,
+    stride_in_m, stride_in_k,
+    stride_weight_n, stride_weight_k,
+    stride_bias_n,
+    stride_out_m, stride_out_n,
+    # Meta-parameters
+    ## Shared-Memory Blocking 
+    BLOCK_SIZE_M: tl.constexpr,
+    BLOCK_SIZE_N: tl.constexpr,
+    BLOCK_SIZE_K: tl.constexpr,
+    ## L2 Blocking
+    GROUP_SIZE_M: tl.constexpr
+):
+    return transformer_gated_linear_forward_kernel(
+        in_ptr, 
+        weight_ptr,
+        bias_ptr,
+        out_ptr,
+        # Matrix dimensions
+        M, 
+        two_N,
+        K,
+        stride_in_m, stride_in_k,
+        stride_weight_n, stride_weight_k,
+        stride_bias_n,
+        stride_out_m, stride_out_n,
+        # Meta-parameters
+        ## Shared-Memory Blocking 
+        BLOCK_SIZE_M,
+        BLOCK_SIZE_N,
+        BLOCK_SIZE_K,
+        ## L2 Blocking
+        GROUP_SIZE_M
+    )
+
 @triton.jit 
 def transformer_gated_linear_forward_kernel(
     in_ptr, 
@@ -230,21 +287,34 @@ def transformer_gated_linear_forward(input_tensor: torch.Tensor, weight_tensor: 
     )
       
     # TODO: figure out how autotuning works to make this cleaner
-    transformer_gated_linear_forward_kernel[grid](
-        input_tensor, 
-        weight_tensor, 
-        bias_tensor, 
-        output_tensor,
-        M, two_N, K,
-        input_tensor.stride(0), input_tensor.stride(1),
-        weight_tensor.stride(0), weight_tensor.stride(1),
-        bias_tensor.stride(0), 
-        output_tensor.stride(0), output_tensor.stride(1),
-        kernel_launch_parameters.block_size_m,
-        kernel_launch_parameters.block_size_n,
-        kernel_launch_parameters.block_size_k,
-        kernel_launch_parameters.group_size_m
-    )
+    if kernel_launch_parameters is not None:
+        transformer_gated_linear_forward_kernel[grid](
+            input_tensor, 
+            weight_tensor, 
+            bias_tensor, 
+            output_tensor,
+            M, two_N, K,
+            input_tensor.stride(0), input_tensor.stride(1),
+            weight_tensor.stride(0), weight_tensor.stride(1),
+            bias_tensor.stride(0), 
+            output_tensor.stride(0), output_tensor.stride(1),
+            kernel_launch_parameters.block_size_m,
+            kernel_launch_parameters.block_size_n,
+            kernel_launch_parameters.block_size_k,
+            kernel_launch_parameters.group_size_m
+        )
+    else:
+        transformer_gated_linear_forward_kernel_autotuned[grid](
+            input_tensor, 
+            weight_tensor, 
+            bias_tensor, 
+            output_tensor,
+            M, two_N, K,
+            input_tensor.stride(0), input_tensor.stride(1),
+            weight_tensor.stride(0), weight_tensor.stride(1),
+            bias_tensor.stride(0), 
+            output_tensor.stride(0), output_tensor.stride(1),
+        )
     return output_tensor
 
 if __name__ == "__main__":
