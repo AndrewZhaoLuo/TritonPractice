@@ -1,4 +1,4 @@
-from base_torch_module import BaseTransformerGatedLinearLayer
+from torch_module import BaseTransformerGatedLinearLayer
 import torch 
 import triton
 from contextlib import ExitStack
