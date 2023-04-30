@@ -291,8 +291,8 @@ def calculate_linear_tile(
     in_load_ptrs = in_ptr + (offs_in_m[:, None] * stride_in_m + offs_k[None, :] * stride_in_k)
     weight_load_ptrs = weight_ptr + (offs_weight_n[:, None] * stride_weight_n + offs_k[None, :] * stride_weight_k)
     for k in range(0, k_tiles):
-        T_in = tl.load(in_load_ptrs, mask=offs_k[None, :] < K - k * BLOCK_SIZE_K, other=0.0) 
-        T_weight = tl.load(weight_load_ptrs, mask=offs_k[None, :] < K - k * BLOCK_SIZE_K, other=0.0)        
+        T_in = tl.load(in_load_ptrs, mask=offs_k[None, :] <= K - k * BLOCK_SIZE_K - 1, other=0.0) 
+        T_weight = tl.load(weight_load_ptrs, mask=offs_k[None, :] <= K - k * BLOCK_SIZE_K - 1, other=0.0)        
         
         # TODO: think about memory implications of transpose 
         # Pro: slightly different ordering of loops is faster
@@ -304,7 +304,7 @@ def calculate_linear_tile(
     offs_bias = pid_tile_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
     offs_bias = offs_bias[None, :]
     bias_load_ptrs = bias_ptr + (offs_bias * stride_bias_n)
-    T_bias = tl.load(bias_load_ptrs, mask=offs_bias < (2 * N), other=0.0)     
+    T_bias = tl.load(bias_load_ptrs, mask=offs_bias < N, other=0.0)     
     accumulator += T_bias
     
     return accumulator
