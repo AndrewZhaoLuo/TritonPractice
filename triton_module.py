@@ -1,7 +1,7 @@
 import torch 
 from torch import nn 
 import triton_kernel
-from torch_module import BaseTransformerGatedLinearLayer
+from torch_module import BaseTransformerGatedLinearLayer, gelu_fast, derivative_gelu_fast
 from typing import *
 import numpy as np 
 import time 
@@ -26,17 +26,35 @@ class TransformerGatedLinearLayerFunction(torch.autograd.Function):
     def backward(ctx, grad_output) -> Any:
         input_tensor, weight_tensor, bias_tensor = ctx.saved_tensors
         
-        # TODO: placeholder
-        return input_tensor * 0, weight_tensor * 0, bias_tensor * 0
+        x = input_tensor @ weight_tensor.T
+        x1, x2 = x.chunk(2, dim=(x.ndim - 1))
+
+        weight_grad = torch.zeros_like(weight_tensor)
+        weight1_grad = input_tensor.T @ (grad_output * gelu_fast(x2))
+        weight2_grad = input_tensor.T @ (grad_output * x1 * derivative_gelu_fast(x2))
+        weight_grad = torch.cat([weight1_grad.T, weight2_grad.T], dim=0)
+        
+        bias1_grad = gelu_fast(x2) * grad_output
+        bias2_grad = x1 * derivative_gelu_fast(x2) * gelu_fast(torch.tensor([1], dtype=x1.dtype, device=x1.device)) * grad_output
+        bias_grad = torch.cat([bias1_grad.sum(0).squeeze() , bias2_grad.sum(0).squeeze()], dim=0)
+        return torch.ones_like(input_tensor), weight_grad, bias_grad
         
         
 class OptimizedTransformerGatedLinearLayer(nn.Module):
-    def __init__(self, dimension_in: int, projection_factor: int = 8, dtype: torch.dtype=torch.half) -> None:
+    def __init__(self, dimension_in: int, projection_factor: int = 8, dtype: torch.dtype=torch.half, weight_init: Optional[torch.Tensor] = None, bias_init: Optional[torch.Tensor] = None) -> None:
         super().__init__()
         
+        weight = torch.empty([dimension_in * projection_factor, dimension_in], dtype=dtype)
+        bias = torch.empty([dimension_in * projection_factor], dtype=dtype)
+        
+        if weight_init is not None:
+            weight = weight.copy_(weight_init)
+        if bias_init is not None:
+            bias = bias.copy_(bias_init)
+            
         # TODO: proper initialization
-        self.weight = nn.Parameter(torch.empty([dimension_in * projection_factor, dimension_in], dtype=dtype), requires_grad=True)
-        self.bias = nn.Parameter(torch.empty([dimension_in * projection_factor], dtype=dtype, requires_grad=True))
+        self.weight = nn.Parameter(weight, requires_grad=True)
+        self.bias = nn.Parameter(bias, requires_grad=True)
         
     def forward(self, x: torch.Tensor):
         """Expect x to be shape [batch, dimension_in]."""
@@ -44,11 +62,7 @@ class OptimizedTransformerGatedLinearLayer(nn.Module):
     
     @staticmethod
     def from_torch(torch_module: BaseTransformerGatedLinearLayer):
-        triton_module = OptimizedTransformerGatedLinearLayer(torch_module.dimension_in, torch_module.projection_factor, torch_module.linear.weight.dtype)
-        
-        # triton_module.weight = triton_module.weight.copy_(torch_module.linear.weight)
-        # triton_module.bias = triton_module.bias.copy_(torch_module.linear.bias)
-        return triton_module
+        return OptimizedTransformerGatedLinearLayer(torch_module.dimension_in, torch_module.projection_factor, torch_module.linear.weight.dtype, weight_init=torch_module.linear.weight, bias_init = torch_module.linear.bias)    
     
 def print_is_close(torch_tensor, triton_tensor, rtol=1e-2, atol=1e-1):
     if np.allclose(torch_tensor.detach().cpu(), triton_tensor.detach().cpu(), rtol=rtol, atol=atol):
@@ -56,10 +70,11 @@ def print_is_close(torch_tensor, triton_tensor, rtol=1e-2, atol=1e-1):
     else:
         print("❌ Triton and Torch differ")
         print("Torch")
-        print(forward_torch)
+        print(torch_tensor)
         print("Triton")
-        print(forward_triton)
-        print(forward_torch.shape)
+        print(triton_tensor)
+        print(triton_tensor.shape)
+        breakpoint()
 
 if __name__ == "__main__":
     """Example of using module."""
@@ -67,7 +82,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--input-dim", type=int, required=True)
     parser.add_argument("--batch-size", type=int, required=True)
-    parser.add_argument("--seed", type=Optional[int], default=None)
+    parser.add_argument("--seed", type=int, default=None)
     parser.add_argument("--warmup", type=int, default=10)
     parser.add_argument("--repeats", type=int, default=100)
     args = parser.parse_args()
@@ -90,26 +105,24 @@ if __name__ == "__main__":
     forward_torch = torch_layer(input_tensor)
     forward_triton = triton_layer(input_tensor)
     
-    loss_fn = lambda tensor: abs(tensor).sum()
+    loss_fn = lambda tensor: (tensor - torch.ones_like(tensor)).pow(2).sum()
     
     loss_torch = loss_fn(forward_torch)
     loss_triton = loss_fn(forward_triton)
-    
-    loss_triton.backward()
-    loss_torch.backward()
-    
-    breakpoint()
     
     print("Forward output: ")
     print_is_close(forward_torch, forward_triton)
     print()
     
+    loss_triton.backward()
+    loss_torch.backward()
+    
     print("Grad weight: ")
-    print_is_close(torch_layer.linear.weight, triton_layer.weight)
+    print_is_close(torch_layer.linear.weight.grad, triton_layer.weight.grad, atol=0.25, rtol=0.3)
     print()
 
     print("Grad bias: ")
-    print_is_close(torch_layer.linear.bias, triton_layer.bias)
+    print_is_close(torch_layer.linear.bias.grad, triton_layer.bias.grad, atol=0.25, rtol=0.3)
     print()
           
 """

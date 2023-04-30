@@ -9,6 +9,17 @@ FAST_GELU_INNER_CONST = 0.044715
 def gelu_fast(x: torch.Tensor) -> torch.Tensor:
     return 0.5 * x * (1.0 + torch.tanh(SQRT_2_OVERPI * x * (1.0 + FAST_GELU_INNER_CONST * x * x)))
 
+def derivative_gelu_fast(x: torch.Tensor) -> torch.Tensor:
+    # Courtesy of wolfram alpha
+    a = SQRT_2_OVERPI
+    b = FAST_GELU_INNER_CONST
+    sech = lambda x: 1 / torch.cosh(x)
+    return 0.5 * (torch.tanh(a * x * (b * x * x + 1)) + 1) + (
+            0.5 * x * (2 * a * b * x * x + a * (b * x * x + 1)) * (
+                sech(a * x * (b * x * x + 1))
+            ) ** 2
+        )
+
 class BaseTransformerGatedLinearLayer(nn.Module):
     def __init__(self, dimension_in: int, projection_factor: int = 8, dtype: torch.dtype=torch.half) -> None:
         super().__init__()
