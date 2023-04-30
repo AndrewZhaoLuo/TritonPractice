@@ -233,14 +233,19 @@ def calculate_dual_linear_tile_fused(
     for k in range(0, k_tiles):
         # Calculate x1 and x2 subanswers at the same time
         T_in = tl.load(in_load_ptrs, mask=offs_k[None, :] < K - k * BLOCK_SIZE_K, other=0.0) 
-        T_weight1 = tl.load(weight1_load_ptrs, mask=offs_k[None, :] < K - k * BLOCK_SIZE_K, other=0.0)        
-        T_weight2 = tl.load(weight2_load_ptrs, mask=offs_k[None, :] < K - k * BLOCK_SIZE_K, other=0.0)        
+        
+        # NOTE: if in the mask you do `< K - k * BLOCK_SIZE_K` instead, it will fail to type check in triton 
+        # git+4b072516e7660d4e1cacea2b03371886ed88e81a and silently give you NaNs in 2.0.0
+        # TODO: file a bug report after creating more reproducible example.
+        T_weight1 = tl.load(weight1_load_ptrs, mask=offs_k[None, :] <= K - k * BLOCK_SIZE_K - 1, other=0.0)        
+        T_weight2 = tl.load(weight2_load_ptrs, mask=offs_k[None, :] <= K - k * BLOCK_SIZE_K - 1, other=0.0)        
 
         # TODO: think about memory implications of transpose 
         # Pro: slightly different ordering of loops is faster
         # Con: using tl.dot probably allows Tensorcore out of box
-        result_out1 = tl.dot(T_in, tl.trans(T_weight1))
-        result_out2 = tl.dot(T_in, tl.trans(T_weight2))
+        #      tl.dot might already support this
+        result_out1 = tl.dot(T_in, T_weight1.T)
+        result_out2 = tl.dot(T_in, T_weight2.T)
         accumulator1 += result_out1
         accumulator2 += result_out2
 
@@ -253,12 +258,11 @@ def calculate_dual_linear_tile_fused(
     offs_bias = offs_bias[None, :]
     bias1_load_ptrs = bias1_ptr + (offs_bias * stride_bias_n)
     bias2_load_ptrs = bias2_ptr + (offs_bias * stride_bias_n)
-    T_bias1 = tl.load(bias1_load_ptrs, mask=offs_bias < (2 * N), other=0.0)     
-    T_bias2 = tl.load(bias2_load_ptrs, mask=offs_bias < (2 * N), other=0.0)     
+    T_bias1 = tl.load(bias1_load_ptrs, mask=offs_bias < N, other=0.0)     
+    T_bias2 = tl.load(bias2_load_ptrs, mask=offs_bias < N, other=0.0)     
     
-    # TODO: figure out why this leads to NaN ???
-    # accumulator1 += T_bias1
-    # accumulator2 += T_bias2    
+    accumulator1 += T_bias1
+    accumulator2 += T_bias2    
 
     return accumulator1, accumulator2
 
@@ -307,7 +311,7 @@ def calculate_linear_tile(
         
 @triton.jit
 def fast_gelu_kernel(buffer):
-    return 0.5 * buffer * (1.0 + tl.libdevice.tanh(SQRT_2_OVERPI * buffer * (1.0 + FAST_GELU_INNER_CONST * buffer * buffer)))
+    return 0.5 * buffer * (1.0 + tl.math.tanh(SQRT_2_OVERPI * buffer * (1.0 + FAST_GELU_INNER_CONST * buffer * buffer)))
 
 def transformer_gated_linear_forward(input_tensor: torch.Tensor, weight_tensor: torch.Tensor, bias_tensor: torch.Tensor, kernel_launch_parameters: Optional[KernelLaunchParameters] = None, synchronize: bool = False) -> torch.Tensor:
     # Check constraints.
@@ -364,27 +368,28 @@ def transformer_gated_linear_forward(input_tensor: torch.Tensor, weight_tensor: 
 if __name__ == "__main__":
     torch.manual_seed(0)
 
-    M = [312, 512, 1000]
+    M = [312, 512, 761, 1000]
     two_N = [312, 512]
-    K = [30, 80]
-    
-    kernel_launch_parameters = KernelLaunchParameters(block_size_m=16, block_size_n=64, block_size_k=16, group_size_m=4)
+    K = [i for i in range(761, 761 + 65)]
+    kernel_launch_parameters = KernelLaunchParameters(block_size_m=16, block_size_n=64, block_size_k=16, group_size_m=1)
     for m, two_n, k in itertools.product(M, two_N, K):
+        print(f"M: {m:<6} 2N: {two_n:<6} K: {k:<6}")
         T_in = torch.randn((m, k), device='cuda', dtype=torch.float16)
         T_weight = torch.randn((two_n, k), device='cuda', dtype=torch.float16)
-        T_bias = torch.randn((two_n,), device='cuda', dtype=torch.float16) * 0
+        T_bias = torch.randn((two_n,), device='cuda', dtype=torch.float16) 
         
         triton_output = transformer_gated_linear_forward(T_in, T_weight, T_bias, kernel_launch_parameters=kernel_launch_parameters)
-        torch_output = T_in @ T_weight.T + T_bias
+        torch_output = T_in.float() @ T_weight.T.float() + T_bias.float()
         x1, x2 = torch_output.chunk(2, dim=(torch_output.ndim - 1))
-        expected_torch_output = x1 * gelu_fast(x2)
+        expected_torch_output = (x1 * gelu_fast(x2)).half()
         
-        print(f"M: {m:<6} 2N: {two_n:<6} K: {k:<6}")
         # TODO: think about if these tolerances are too high
         if torch.allclose(triton_output, expected_torch_output, atol=1e-1, rtol=1e-1):
             print("✅ Triton and Torch match")
         else:
             print("❌ Triton and Torch differ")
+            print("Triton")
             print(triton_output)
-            breakpoint()
+            print("Torch")
+            print(expected_torch_output)
         print()
