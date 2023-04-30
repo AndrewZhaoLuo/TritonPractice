@@ -1,45 +1,3 @@
-"""
-Basic idea forward:
-    - the hairy part of the gelu_fast is not decomposable (or at least I can't figure one out)
-        - it is therefore relegated to being fused at the tail end of x2
-    - we don't want to store intermediate activations
-        - when we calculate `gelu_fast(x2)` we want to combine it with x1 
-            without storing each tiled subsolution.
-        - Luckily the multiplication in x1 * gelu_fast(x2) is decomposable
-        - Consider a standard tiled matmul where C = \sum_i (A_i @ B_i)
-            where C is an output tile and A_i and B_i are the corresponding tiles
-            broken along the dimension of reduction
-        - Let's say x1 was just a single tile, then x1 * gelu_fast(x2) -->
-            [sum_i (A_i @ B_i)] * gelu_fast(x2)
-        - To do this, just load the corresponding output tile in gelu_fast(x2) to shared memory
-            then when you do your tiled matmul do as normal but do elemwise multiplication
-            with the gelu_fast(x2) before accumulating. Otherwise do as normal
-            
-Basic idea backward:
-    need to brush up on autograd but you want dL/dW where L is the loss, W is the weight matrix.
-    if the input is x_in then Y can be written as this program:
-        % x1 = x_in @ w1
-        % x2 = x_in @ w2
-        % Y = x1 * fast_gelu(x2)
-    where @ is matmul and w1 and w2 are the weights of W split along the chunks.
-    So given dL/dy we want dL/dw1 and dL/dw2
-    
-    dL/dw1 = dL/dy * dy/dw1 and dL/dw2 = dL/dy * dL/dw2       
-    
-    By wolfram alpha fast_gelu'(x) = 0.5 tanh(a(b * x^3 + x)) 
-                                    + a * x (1.5 * b * x^2 + 0.5) * sech^2(a(b x^3 + x))
-                                    + 0.5
-    Where a = SQRT_2_OVERPI and b = FAST_GELU_INNER_CONST
-                                    
-    So dY/dw1 = fast_gelu(x2) * dx1/dw1    
-       dY/dw2 = x1 * fast_gelu'(x2) * dx2/dw2 
-       
-    Where dx1/dw1 and dx2/dw2 we can just look up online for the lienar layers (pretty sure it's just x1).
-
-    To calculate this efficiently you can just do. We don't need to store any intermediate tensors.
-    TODO: deal with transposed weights
-"""
-
 import torch 
 import triton 
 import triton.language as tl 
@@ -128,44 +86,6 @@ def transformer_gated_linear_forward_kernel(
     # Map final output tile indices
     pid_tile_m = group_start_pid + (pid % group_size_m)
     pid_tile_n = (pid % num_pid_in_group) // group_size_m
-    
-    # # Part 1: fast_gelu(x2) calculation
-    # accumulator_x2 = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=tl.float32)    
-    # weight2_ptr = weight_ptr + N * stride_weight_n
-    # bias2_ptr = bias_ptr + N * stride_bias_n
-    # accumulator_x2 = calculate_linear_tile(
-    #     accumulator_x2, 
-    #     in_ptr, 
-    #     weight2_ptr, 
-    #     bias2_ptr,
-    #     pid_tile_m, 
-    #     pid_tile_n, 
-    #     M, N, K, 
-    #     stride_in_m, stride_in_k, 
-    #     stride_weight_n, stride_weight_k, 
-    #     stride_bias_n,
-    #     BLOCK_SIZE_M, BLOCK_SIZE_N, BLOCK_SIZE_K
-    # )
-    # accumulator_x2 = fast_gelu_kernel(accumulator_x2)
-        
-    # # Part 2: x1 calculation of corresponding tile
-    # # TODO: parallelize this across SM + synchronization
-    # accumulator_x1 = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=tl.float32)    
-    # weight1_ptr = weight_ptr
-    # bias1_ptr = bias_ptr
-    # accumulator_x1 = calculate_linear_tile(
-    #     accumulator_x1, 
-    #     in_ptr, 
-    #     weight1_ptr, 
-    #     bias1_ptr,
-    #     pid_tile_m, 
-    #     pid_tile_n, 
-    #     M, N, K, 
-    #     stride_in_m, stride_in_k, 
-    #     stride_weight_n, stride_weight_k, 
-    #     stride_bias_n,
-    #     BLOCK_SIZE_M, BLOCK_SIZE_N, BLOCK_SIZE_K
-    # )
 
     # Part 1 + 2: calculate x1 and x2 tile in parallel
     # TODO: bias leads to NaN, figure out why???
@@ -265,45 +185,6 @@ def calculate_dual_linear_tile_fused(
     accumulator2 += T_bias2    
 
     return accumulator1, accumulator2
-
-@triton.jit
-def calculate_linear_tile(
-    accumulator, 
-    in_ptr,
-    weight_ptr,
-    bias_ptr,
-    pid_tile_m, 
-    pid_tile_n, 
-    # Dimensions for iterating
-    M, N, K, 
-    stride_in_m, stride_in_k,
-    stride_weight_n, stride_weight_k,
-    stride_bias_n,
-    # Block size information
-    BLOCK_SIZE_M, BLOCK_SIZE_N, BLOCK_SIZE_K
-):
-    """Calculates the tile at (pid_tile_m, pid_tile_n)"""
-    k_tiles = tl.cdiv(K, BLOCK_SIZE_K)
-
-    offs_in_m = (pid_tile_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)) % M
-    offs_weight_n = (pid_tile_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)) % N
-    offs_k = tl.arange(0, BLOCK_SIZE_K)
-    in_load_ptrs = in_ptr + (offs_in_m[:, None] * stride_in_m + offs_k[None, :] * stride_in_k)
-    weight_load_ptrs = weight_ptr + (offs_weight_n[:, None] * stride_weight_n + offs_k[None, :] * stride_weight_k)
-    for k in range(0, k_tiles):
-        T_in = tl.load(in_load_ptrs, mask=offs_k[None, :] <= K - k * BLOCK_SIZE_K - 1, other=0.0) 
-        T_weight = tl.load(weight_load_ptrs, mask=offs_k[None, :] <= K - k * BLOCK_SIZE_K - 1, other=0.0)        
-        accumulator += tl.dot(T_in, tl.trans(T_weight))
-        in_load_ptrs += BLOCK_SIZE_K * stride_in_k
-        weight_load_ptrs += BLOCK_SIZE_K * stride_weight_k
-        
-    offs_bias = pid_tile_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
-    offs_bias = offs_bias[None, :]
-    bias_load_ptrs = bias_ptr + (offs_bias * stride_bias_n)
-    T_bias = tl.load(bias_load_ptrs, mask=offs_bias < N, other=0.0)     
-    accumulator += T_bias
-    
-    return accumulator
         
 @triton.jit
 def fast_gelu_kernel(buffer):
