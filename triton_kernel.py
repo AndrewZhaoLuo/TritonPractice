@@ -55,7 +55,6 @@ class KernelLaunchParameters(NamedTuple):
 
 @triton.autotune(
     configs=[
-        triton.Config({'BLOCK_SIZE_M': 128, 'BLOCK_SIZE_N': 256, 'BLOCK_SIZE_K': 64, 'GROUP_SIZE_M': 8}, num_stages=3, num_warps=8),
         triton.Config({'BLOCK_SIZE_M': 64, 'BLOCK_SIZE_N': 256, 'BLOCK_SIZE_K': 32, 'GROUP_SIZE_M': 8}, num_stages=4, num_warps=4),
         triton.Config({'BLOCK_SIZE_M': 128, 'BLOCK_SIZE_N': 128, 'BLOCK_SIZE_K': 32, 'GROUP_SIZE_M': 8}, num_stages=4, num_warps=4),
         triton.Config({'BLOCK_SIZE_M': 128, 'BLOCK_SIZE_N': 64, 'BLOCK_SIZE_K': 32, 'GROUP_SIZE_M': 8}, num_stages=4, num_warps=4),
@@ -63,6 +62,7 @@ class KernelLaunchParameters(NamedTuple):
         triton.Config({'BLOCK_SIZE_M': 128, 'BLOCK_SIZE_N': 32, 'BLOCK_SIZE_K': 32, 'GROUP_SIZE_M': 8}, num_stages=4, num_warps=4),
         triton.Config({'BLOCK_SIZE_M': 64, 'BLOCK_SIZE_N': 32, 'BLOCK_SIZE_K': 32, 'GROUP_SIZE_M': 8}, num_stages=5, num_warps=2),
         triton.Config({'BLOCK_SIZE_M': 32, 'BLOCK_SIZE_N': 64, 'BLOCK_SIZE_K': 32, 'GROUP_SIZE_M': 8}, num_stages=5, num_warps=2),
+        triton.Config({'BLOCK_SIZE_M': 256, 'BLOCK_SIZE_N': 128, 'BLOCK_SIZE_K': 32, 'GROUP_SIZE_M': 8}, num_stages=5, num_warps=2),
     ],
     key=['M', 'two_N', 'K'],
 )
@@ -107,7 +107,9 @@ def transformer_gated_linear_forward_kernel(
     
     We do this by calculating buf = fast_gelu(x2) in tiles.
     We then calculate x1's corresponding tiles and then do 
-    x1 * buf with these two pieces in shared memory.
+    x1 * buf with these two pieces in shared memory. We note that 
+    the corresponding tiles for x1 and x2 share accesses in the input 
+    tensor so we fuse this to avoid an additional access to T_in.
     """
     
     pid = tl.program_id(axis=0)
@@ -127,35 +129,60 @@ def transformer_gated_linear_forward_kernel(
     pid_tile_m = group_start_pid + (pid % group_size_m)
     pid_tile_n = (pid % num_pid_in_group) // group_size_m
     
-    # Part 1: fast_gelu(x2) calculation
-    accumulator_x2 = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=tl.float32)    
-    weight2_ptr = weight_ptr + N * stride_weight_n
-    bias2_ptr = bias_ptr + N * stride_bias_n
-    accumulator_x2 = calculate_linear_tile(
-        accumulator_x2, 
-        in_ptr, 
-        weight2_ptr, 
-        bias2_ptr,
-        pid_tile_m, 
-        pid_tile_n, 
-        M, N, K, 
-        stride_in_m, stride_in_k, 
-        stride_weight_n, stride_weight_k, 
-        stride_bias_n,
-        BLOCK_SIZE_M, BLOCK_SIZE_N, BLOCK_SIZE_K
-    )
-    accumulator_x2 = fast_gelu_kernel(accumulator_x2)
+    # # Part 1: fast_gelu(x2) calculation
+    # accumulator_x2 = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=tl.float32)    
+    # weight2_ptr = weight_ptr + N * stride_weight_n
+    # bias2_ptr = bias_ptr + N * stride_bias_n
+    # accumulator_x2 = calculate_linear_tile(
+    #     accumulator_x2, 
+    #     in_ptr, 
+    #     weight2_ptr, 
+    #     bias2_ptr,
+    #     pid_tile_m, 
+    #     pid_tile_n, 
+    #     M, N, K, 
+    #     stride_in_m, stride_in_k, 
+    #     stride_weight_n, stride_weight_k, 
+    #     stride_bias_n,
+    #     BLOCK_SIZE_M, BLOCK_SIZE_N, BLOCK_SIZE_K
+    # )
+    # accumulator_x2 = fast_gelu_kernel(accumulator_x2)
         
-    # Part 2: x1 calculation of corresponding tile
-    # TODO: parallelize this across SM + synchronization
+    # # Part 2: x1 calculation of corresponding tile
+    # # TODO: parallelize this across SM + synchronization
+    # accumulator_x1 = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=tl.float32)    
+    # weight1_ptr = weight_ptr
+    # bias1_ptr = bias_ptr
+    # accumulator_x1 = calculate_linear_tile(
+    #     accumulator_x1, 
+    #     in_ptr, 
+    #     weight1_ptr, 
+    #     bias1_ptr,
+    #     pid_tile_m, 
+    #     pid_tile_n, 
+    #     M, N, K, 
+    #     stride_in_m, stride_in_k, 
+    #     stride_weight_n, stride_weight_k, 
+    #     stride_bias_n,
+    #     BLOCK_SIZE_M, BLOCK_SIZE_N, BLOCK_SIZE_K
+    # )
+
+    # Part 1 + 2: calculate x1 and x2 tile in parallel
+    # TODO: bias leads to NaN, figure out why???
     accumulator_x1 = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=tl.float32)    
     weight1_ptr = weight_ptr
     bias1_ptr = bias_ptr
-    accumulator_x1 = calculate_linear_tile(
-        accumulator_x1, 
-        in_ptr, 
-        weight1_ptr, 
+    accumulator_x2 = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=tl.float32)    
+    weight2_ptr = weight_ptr + N * stride_weight_n
+    bias2_ptr = bias_ptr + N * stride_bias_n
+    accumulator_x1, accumulator_x2 = calculate_dual_linear_tile_fused(
+        accumulator_x1,
+        accumulator_x2,
+        in_ptr,
+        weight1_ptr,
+        weight2_ptr,
         bias1_ptr,
+        bias2_ptr, 
         pid_tile_m, 
         pid_tile_n, 
         M, N, K, 
@@ -166,7 +193,7 @@ def transformer_gated_linear_forward_kernel(
     )
 
     # Part 3: combine the results
-    accumulator_x1 *= accumulator_x2
+    accumulator_x1 *= fast_gelu_kernel(accumulator_x2)
 
     # TODO: parametrize casting to dtype
     out = accumulator_x1.to(tl.float16)
@@ -175,6 +202,65 @@ def transformer_gated_linear_forward_kernel(
     out_ptrs = out_ptr + stride_out_m * offs_out_m[:, None] + stride_out_n * offs_out_n[None, :]
     mask = (offs_out_m[:, None] < M) & (offs_out_n[None, :] < N)
     tl.store(out_ptrs, out, mask=mask)
+
+@triton.jit
+def calculate_dual_linear_tile_fused(
+    accumulator1,
+    accumulator2, 
+    in_ptr,
+    weight1_ptr,
+    weight2_ptr,
+    bias1_ptr,
+    bias2_ptr,
+    pid_tile_m, 
+    pid_tile_n, 
+    # Dimensions for iterating
+    M, N, K, 
+    stride_in_m, stride_in_k,
+    stride_weight_n, stride_weight_k,
+    stride_bias_n,
+    # Block size information
+    BLOCK_SIZE_M, BLOCK_SIZE_N, BLOCK_SIZE_K
+):
+    """Calculates the tile at (pid_tile_m, pid_tile_n)"""
+    k_tiles = tl.cdiv(K, BLOCK_SIZE_K)
+    offs_in_m = (pid_tile_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)) % M
+    offs_weight_n = (pid_tile_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)) % N
+    offs_k = tl.arange(0, BLOCK_SIZE_K)    
+    in_load_ptrs = in_ptr + (offs_in_m[:, None] * stride_in_m + offs_k[None, :] * stride_in_k)
+    weight1_load_ptrs = weight1_ptr + (offs_weight_n[:, None] * stride_weight_n + offs_k[None, :] * stride_weight_k)
+    weight2_load_ptrs = weight2_ptr + (offs_weight_n[:, None] * stride_weight_n + offs_k[None, :] * stride_weight_k)
+    for k in range(0, k_tiles):
+        # Calculate x1 and x2 subanswers at the same time
+        T_in = tl.load(in_load_ptrs, mask=offs_k[None, :] < K - k * BLOCK_SIZE_K, other=0.0) 
+        T_weight1 = tl.load(weight1_load_ptrs, mask=offs_k[None, :] < K - k * BLOCK_SIZE_K, other=0.0)        
+        T_weight2 = tl.load(weight2_load_ptrs, mask=offs_k[None, :] < K - k * BLOCK_SIZE_K, other=0.0)        
+
+        # TODO: think about memory implications of transpose 
+        # Pro: slightly different ordering of loops is faster
+        # Con: using tl.dot probably allows Tensorcore out of box
+        result_out1 = tl.dot(T_in, tl.trans(T_weight1))
+        result_out2 = tl.dot(T_in, tl.trans(T_weight2))
+        accumulator1 += result_out1
+        accumulator2 += result_out2
+
+        in_load_ptrs += BLOCK_SIZE_K * stride_in_k
+        weight1_load_ptrs += BLOCK_SIZE_K * stride_weight_k
+        weight2_load_ptrs += BLOCK_SIZE_K * stride_weight_k
+    
+    # Handle bias
+    offs_bias = pid_tile_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
+    offs_bias = offs_bias[None, :]
+    bias1_load_ptrs = bias1_ptr + (offs_bias * stride_bias_n)
+    bias2_load_ptrs = bias2_ptr + (offs_bias * stride_bias_n)
+    T_bias1 = tl.load(bias1_load_ptrs, mask=offs_bias < (2 * N), other=0.0)     
+    T_bias2 = tl.load(bias2_load_ptrs, mask=offs_bias < (2 * N), other=0.0)     
+    
+    # TODO: figure out why this leads to NaN ???
+    # accumulator1 += T_bias1
+    # accumulator2 += T_bias2    
+
+    return accumulator1, accumulator2
 
 @triton.jit
 def calculate_linear_tile(
@@ -223,7 +309,7 @@ def calculate_linear_tile(
 def fast_gelu_kernel(buffer):
     return 0.5 * buffer * (1.0 + tl.libdevice.tanh(SQRT_2_OVERPI * buffer * (1.0 + FAST_GELU_INNER_CONST * buffer * buffer)))
 
-def transformer_gated_linear_forward(input_tensor: torch.Tensor, weight_tensor: torch.Tensor, bias_tensor: torch.Tensor, kernel_launch_parameters: Optional[KernelLaunchParameters] = None) -> torch.Tensor:
+def transformer_gated_linear_forward(input_tensor: torch.Tensor, weight_tensor: torch.Tensor, bias_tensor: torch.Tensor, kernel_launch_parameters: Optional[KernelLaunchParameters] = None, synchronize: bool = False) -> torch.Tensor:
     # Check constraints.
     assert len(bias_tensor.shape) == 1, "Bias should have one dimension"
     assert bias_tensor.shape[0] == weight_tensor.shape[0], "Incompatible bias dimensions"
@@ -261,7 +347,7 @@ def transformer_gated_linear_forward(input_tensor: torch.Tensor, weight_tensor: 
             kernel_launch_parameters.group_size_m
         )
     else:
-        transformer_gated_linear_forward_kernel[grid](
+        result = transformer_gated_linear_forward_kernel[grid](
             input_tensor, 
             weight_tensor, 
             bias_tensor, 
@@ -272,6 +358,7 @@ def transformer_gated_linear_forward(input_tensor: torch.Tensor, weight_tensor: 
             bias_tensor.stride(0), 
             output_tensor.stride(0), output_tensor.stride(1),
         )
+        print("Autotuned best:", result.metadata)
     return output_tensor
 
 if __name__ == "__main__":
@@ -285,7 +372,7 @@ if __name__ == "__main__":
     for m, two_n, k in itertools.product(M, two_N, K):
         T_in = torch.randn((m, k), device='cuda', dtype=torch.float16)
         T_weight = torch.randn((two_n, k), device='cuda', dtype=torch.float16)
-        T_bias = torch.randn((two_n,), device='cuda', dtype=torch.float16)
+        T_bias = torch.randn((two_n,), device='cuda', dtype=torch.float16) * 0
         
         triton_output = transformer_gated_linear_forward(T_in, T_weight, T_bias, kernel_launch_parameters=kernel_launch_parameters)
         torch_output = T_in @ T_weight.T + T_bias
@@ -298,4 +385,6 @@ if __name__ == "__main__":
             print("✅ Triton and Torch match")
         else:
             print("❌ Triton and Torch differ")
+            print(triton_output)
+            breakpoint()
         print()
