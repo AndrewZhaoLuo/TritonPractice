@@ -15,7 +15,7 @@ class TransformerGatedLinearLayerFunction(torch.autograd.Function):
         weight_tensor, 
         bias_tensor
     ):
-        ctx.save_for_backward(input_tensor, weight_tensor, bias_tensor)
+        ctx.save_for_backward(input_tensor, weight_tensor)
         return triton_kernel.transformer_gated_linear_forward(
             input_tensor, 
             weight_tensor, 
@@ -24,14 +24,13 @@ class TransformerGatedLinearLayerFunction(torch.autograd.Function):
         
     @staticmethod
     def backward(ctx, grad_output) -> Any:
-        input_tensor, weight_tensor, bias_tensor = ctx.saved_tensors
+        input_tensor, weight_tensor = ctx.saved_tensors
         
         x = input_tensor @ weight_tensor.T
         x1, x2 = x.chunk(2, dim=(x.ndim - 1))
         w1, w2 = weight_tensor.chunk(2, dim=0)
 
         # weight calculation
-        weight_grad = torch.zeros_like(weight_tensor)
         weight1_grad = input_tensor.T @ (grad_output * gelu_fast(x2))
         weight2_grad = input_tensor.T @ (grad_output * x1 * derivative_gelu_fast(x2))
         weight_grad = torch.cat([weight1_grad.T, weight2_grad.T], dim=0)
@@ -137,44 +136,3 @@ if __name__ == "__main__":
     print("Grad input: ")
     print_is_close(input_tensor_torch.grad, input_tensor_triton.grad, atol=0.25, rtol=0.5)
     print()
-    
-"""
-transformer_gated_linear_forward_kernel_0d1d2d3d4d5d6d7d8c9d10c11c12d13c
-Begins: 117.833s
-Ends: 117.957s (+123.301 ms)
-grid:  <<<40960, 1, 1>>>
-block: <<<64, 1, 1>>>
-Launch Type: Regular
-Static Shared Memory: 0 bytes
-Dynamic Shared Memory: 8,192 bytes
-Registers Per Thread: 166
-Local Memory Per Thread: 0 bytes
-Local Memory Total: 64,815,104 bytes
-Shared Memory executed: 65,536 bytes
-Shared Memory Bank Size: 4 B
-Theoretical occupancy: 25 %
-Launched from thread: 1390772
-Latency: ←13.597 s
-Correlation ID: 15062
-Stream: Default stream 7
-
-void cutlass::Kernel<cutlass_80_tensorop_f16_s16816gemm_relu_f16_256x128_32x3_tn_align8>(T1::Params)
-Begins: 31.886s
-Ends: 31.9963s (+110.296 ms)
-grid:  <<<128, 40, 1>>>
-block: <<<256, 1, 1>>>
-Launch Type: Regular
-Static Shared Memory: 0 bytes
-Dynamic Shared Memory: 73,728 bytes
-Registers Per Thread: 232
-Local Memory Per Thread: 0 bytes
-Local Memory Total: 64,815,104 bytes
-Shared Memory requested: 65,536 bytes
-Shared Memory executed: 102,400 bytes
-Shared Memory Bank Size: 4 B
-Theoretical occupancy: 16.6667 %
-Launched from thread: 1390772
-Latency: ←10.458 s
-Correlation ID: 10943
-Stream: Default stream 7
-"""

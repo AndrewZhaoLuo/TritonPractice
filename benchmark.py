@@ -7,6 +7,7 @@ from torch import nn
 from typing import Tuple
 import gc 
 import itertools
+from typing import Callable
 
 IMPLEMENTATIONS = ['torch', 'triton']
 QUANTILES_TO_REPORT = [0.5, 0.2, 0.8]
@@ -24,77 +25,109 @@ def get_module(input_dim: int, implementation: str, projection_factor: int = 8, 
 
     return module
 
-# TODO: adapt this benchmarking script
-def benchmark_backward(batch_size: int, input_dim: int, implementation:str, projection_factor: int = 8, dtype: torch.dtype=torch.half) -> Tuple[Tuple[int, ...], int]:
-    torch.cuda.reset_peak_memory_stats(device='cuda')
-    x = torch.randn(batch_size, input_dim, dtype=dtype, device='cuda')
-        
-    module = get_module(input_dim, implementation, projection_factor, dtype)
-    module.to('cuda')
-        
-    memory_baseline = torch.cuda.max_memory_allocated(device='cuda')    
-    loss = torch.sum(torch.abs(module(x)))
-    results = triton.testing.do_bench(lambda: loss.backward(retain_graph=True), percentiles=QUANTILES_TO_REPORT, grad_to_none=[x])
-    peak_memory_backward = torch.cuda.max_memory_allocated(device='cuda')
-    
-    return results, peak_memory_backward - memory_baseline
-
-def is_cuda_oom(err: RuntimeError) -> bool:
+def is_cuda_oom_err(err: RuntimeError) -> bool:
     return 'out of memory' in str(err)
 
-def benchmark_forward_runtime(batch_size: int, input_dim: int, implementation: str, projection_factor: int = 8, dtype: torch.dtype=torch.half, no_grad: bool = False, warmup: int = 25, rep: int = 100):    
-    print("Run", implementation, batch_size, input_dim, no_grad)
+def _benchmark_runtime(func: Callable, no_grad: bool = False, warmup: int = 25, rep: int = 100):    
     try:
-        x = torch.randn(batch_size, input_dim, dtype=dtype, device='cuda')
-        module = get_module(input_dim, implementation, projection_factor, dtype)
-        module.to('cuda')
-        
         with ExitStack() as stack:
             if no_grad:
                 stack.enter_context(torch.no_grad())
-            results= triton.testing.do_bench(lambda: module(x), percentiles=QUANTILES_TO_REPORT, warmup=warmup, rep=rep)
-        
-        return results
+            return triton.testing.do_bench(func, percentiles=QUANTILES_TO_REPORT, warmup=warmup, rep=rep)
     except RuntimeError as e:
-        if is_cuda_oom(e):
-            return 0, 0, 0
+        if is_cuda_oom_err(e):
+            return None
         raise e
 
-def benchmark_forward_memory_usage(batch_size: int, input_dim: int, implementation: str, projection_factor: int = 8, dtype: torch.dtype=torch.half, no_grad: bool = False):
-    print("Mem", implementation, batch_size, input_dim, no_grad)
+def benchmark_forward_runtime(batch_size: int, input_dim: int, implementation: str, projection_factor: int = 8, dtype: torch.dtype=torch.half, warmup: int = 25, rep: int = 100):    
     try:
         x = torch.randn(batch_size, input_dim, dtype=dtype, device='cuda')
         module = get_module(input_dim, implementation, projection_factor, dtype)
         module.to('cuda')
-        
-        with ExitStack() as stack:
-            if no_grad:
-                stack.enter_context(torch.no_grad())
-                
-            # Warmup, used for populating autotuning cache
+        def func():
             module(x)
-            
-            # Force collect objects from warmup just in case
-            gc.collect()
-            
-            # Note this may not pick up memory not allocated by torch.
-            # Assume the triton kernel does not malloc cuda global memory
-            baseline_memory_allocated = torch.cuda.memory_allocated()
-            torch.cuda.reset_max_memory_allocated()
-            _ = module(x)
-            max_memory_allocated = torch.cuda.max_memory_allocated()
-            return (max_memory_allocated - baseline_memory_allocated) / BYTES_IN_MB
+        return _benchmark_runtime(func, no_grad=False, warmup=warmup, rep=rep)
     except RuntimeError as e:
-        if is_cuda_oom(e):
-            return 0
+        if is_cuda_oom_err(e):
+            return None
         raise e
 
+def benchmark_backward_runtime(batch_size: int, input_dim: int, implementation: str, projection_factor: int = 8, dtype: torch.dtype=torch.half, warmup: int = 25, rep: int = 100):    
+    try:
+        x = torch.randn(batch_size, input_dim, dtype=dtype, device='cuda')
+        module = get_module(input_dim, implementation, projection_factor, dtype)
+        module.to('cuda')
+        result = module(x).sum()
+        def func():
+            result.backward(retain_graph=True)
+        return _benchmark_runtime(func, no_grad=False, warmup=warmup, rep=rep)
+    except RuntimeError as e:
+        if is_cuda_oom_err(e):
+            return None
+        raise e
+
+def _benchmark_memory_usage(func: Callable, no_grad: bool = False):
+    with ExitStack() as stack:
+        if no_grad:
+            stack.enter_context(torch.no_grad())
+            
+        # Warmup, used for populating autotuning cache
+        func()
+        
+        # Force collect objects from warmup just in case
+        gc.collect()
+        
+        # Note this may not pick up memory not allocated by torch.
+        # Assume the triton kernel does not malloc cuda global memory
+        baseline_memory_allocated = torch.cuda.memory_allocated()
+        torch.cuda.reset_max_memory_allocated()
+        _ = func()
+        max_memory_allocated = torch.cuda.max_memory_allocated()
+        return (max_memory_allocated - baseline_memory_allocated) / BYTES_IN_MB
+
+
+def benchmark_forward_memory_usage(batch_size: int, input_dim: int, implementation: str, projection_factor: int = 8, dtype: torch.dtype=torch.half):
+    try: 
+        x = torch.randn(batch_size, input_dim, dtype=dtype, device='cuda')
+        module = get_module(input_dim, implementation, projection_factor, dtype)
+        module.to('cuda')   
+        def func():
+            return module(x)
+        return _benchmark_memory_usage(func, no_grad=False)
+    except RuntimeError as e:
+        if is_cuda_oom_err(e):
+            return None
+        raise e
+    
+def benchmark_backward_memory_usage(batch_size: int, input_dim: int, implementation: str, projection_factor: int = 8, dtype: torch.dtype=torch.half):
+    try: 
+        x = torch.randn(batch_size, input_dim, dtype=dtype, device='cuda')
+        module = get_module(input_dim, implementation, projection_factor, dtype)
+        module.to('cuda')   
+        result = module(x).sum()
+        def func():
+            result.backward(retain_graph=True)
+        return _benchmark_memory_usage(func, no_grad=False)
+    except RuntimeError as e:
+        if is_cuda_oom_err(e):
+            return None
+        raise e
+    
 if __name__ == "__main__":
     """Benchmark implementations.
     
     Note before going run the following commands to fix clock speeds (suggest normal baselines):
         - TODO
     """
+    print(benchmark_backward_memory_usage(1024, 32, 'triton'))
+    print(benchmark_backward_memory_usage(1024, 32, 'torch'))
+    print(benchmark_forward_memory_usage(1024, 32, 'triton'))
+    print(benchmark_forward_memory_usage(1024, 32, 'torch'))
+    print(benchmark_backward_runtime(1024, 32, 'triton'))
+    print(benchmark_backward_runtime(1024, 32, 'torch'))
+    print(benchmark_forward_runtime(1024, 32, 'triton'))
+    print(benchmark_forward_runtime(1024, 32, 'torch'))
+    breakpoint()
     
     # Some popular hidden dimension sizes (d):
     # vicuna 13B - 5120
@@ -104,7 +137,7 @@ if __name__ == "__main__":
     
     # Only large batch sizes are interesting, especially when N >> d
     batch_sizes = [1024, 1024 * 10, 1024 * 40, 1024 * 80]
-    benchmark_reports_runtime = [
+    benchmark_reports_runtime_forward = [
         triton.testing.Benchmark(
             x_names=['input_dim'],  # Argument names to use as an x-axis for the plot
             x_vals=input_dim_vals,  # Different possible values for `x_name`
@@ -137,7 +170,7 @@ if __name__ == "__main__":
         ) for batch_size in batch_sizes
     ]
     
-    benchmark_runtime = triton.testing.perf_report(benchmark_reports_runtime)(benchmark_forward_runtime)
+    benchmark_runtime = triton.testing.perf_report(benchmark_reports_runtime_forward)(benchmark_forward_runtime)
     benchmark_memory = triton.testing.perf_report(benchmark_reports_memory)(benchmark_forward_memory_usage)
     
     # TODO: needs sudo

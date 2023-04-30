@@ -358,7 +358,7 @@ def transformer_gated_linear_forward(input_tensor: torch.Tensor, weight_tensor: 
             bias_tensor.stride(0), 
             output_tensor.stride(0), output_tensor.stride(1),
         )
-        print("Autotuned best:", result.metadata)
+        # print("Autotuned best:", result.metadata)
     return output_tensor
 
 if __name__ == "__main__":
