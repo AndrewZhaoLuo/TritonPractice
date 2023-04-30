@@ -67,50 +67,6 @@ class KernelLaunchParameters(NamedTuple):
     key=['M', 'two_N', 'K'],
 )
 @triton.jit 
-def transformer_gated_linear_forward_kernel_autotuned(
-    in_ptr, 
-    weight_ptr,
-    bias_ptr,
-    out_ptr,
-    # Matrix dimensions
-    M, 
-    two_N,
-    K,
-    stride_in_m, stride_in_k,
-    stride_weight_n, stride_weight_k,
-    stride_bias_n,
-    stride_out_m, stride_out_n,
-    # Meta-parameters
-    ## Shared-Memory Blocking 
-    BLOCK_SIZE_M: tl.constexpr,
-    BLOCK_SIZE_N: tl.constexpr,
-    BLOCK_SIZE_K: tl.constexpr,
-    ## L2 Blocking
-    GROUP_SIZE_M: tl.constexpr
-):
-    return transformer_gated_linear_forward_kernel(
-        in_ptr, 
-        weight_ptr,
-        bias_ptr,
-        out_ptr,
-        # Matrix dimensions
-        M, 
-        two_N,
-        K,
-        stride_in_m, stride_in_k,
-        stride_weight_n, stride_weight_k,
-        stride_bias_n,
-        stride_out_m, stride_out_n,
-        # Meta-parameters
-        ## Shared-Memory Blocking 
-        BLOCK_SIZE_M,
-        BLOCK_SIZE_N,
-        BLOCK_SIZE_K,
-        ## L2 Blocking
-        GROUP_SIZE_M
-    )
-
-@triton.jit 
 def transformer_gated_linear_forward_kernel(
     in_ptr, 
     weight_ptr,
@@ -267,7 +223,7 @@ def calculate_linear_tile(
 def fast_gelu_kernel(buffer):
     return 0.5 * buffer * (1.0 + tl.libdevice.tanh(SQRT_2_OVERPI * buffer * (1.0 + FAST_GELU_INNER_CONST * buffer * buffer)))
 
-def transformer_gated_linear_forward(input_tensor: torch.Tensor, weight_tensor: torch.Tensor, bias_tensor: torch.Tensor, kernel_launch_parameters: Optional[KernelLaunchParameters]) -> torch.Tensor:
+def transformer_gated_linear_forward(input_tensor: torch.Tensor, weight_tensor: torch.Tensor, bias_tensor: torch.Tensor, kernel_launch_parameters: Optional[KernelLaunchParameters] = None) -> torch.Tensor:
     # Check constraints.
     assert len(bias_tensor.shape) == 1, "Bias should have one dimension"
     assert bias_tensor.shape[0] == weight_tensor.shape[0], "Incompatible bias dimensions"
@@ -288,7 +244,8 @@ def transformer_gated_linear_forward(input_tensor: torch.Tensor, weight_tensor: 
       
     # TODO: figure out how autotuning works to make this cleaner
     if kernel_launch_parameters is not None:
-        transformer_gated_linear_forward_kernel[grid](
+        base_function = transformer_gated_linear_forward_kernel.fn
+        base_function[grid](
             input_tensor, 
             weight_tensor, 
             bias_tensor, 
@@ -304,7 +261,7 @@ def transformer_gated_linear_forward(input_tensor: torch.Tensor, weight_tensor: 
             kernel_launch_parameters.group_size_m
         )
     else:
-        transformer_gated_linear_forward_kernel_autotuned[grid](
+        transformer_gated_linear_forward_kernel[grid](
             input_tensor, 
             weight_tensor, 
             bias_tensor, 
