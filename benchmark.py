@@ -18,7 +18,7 @@ def get_module(input_dim: int, implementation: str, projection_factor: int = 8, 
     elif implementation == 'triton':
         # TODO: fixing this
         module = BaseTransformerGatedLinearLayer(input_dim, projection_factor=projection_factor, dtype=dtype) 
-        module = OptimizedTransformerGatedLinearLayer(module)
+        module = OptimizedTransformerGatedLinearLayer.from_torch(module)
     else:
         raise ValueError(f"Unknown implementation {implementation}")
 
@@ -116,9 +116,9 @@ if __name__ == "__main__":
             # Line styles
             styles=[('green', '-'), ('blue', '-')],
             ylabel="Runtime (ms)",  # Label name for the y-axis
-            plot_name=f"runtime-gated-linear-attention-{'inference' if no_grad else 'forward'}-bs={batch_size}",  # Name for the plot, used also as a file name for saving the plot.
-            args={'batch_size': batch_size, 'no_grad': True},
-        ) for batch_size, no_grad in itertools.product(batch_sizes, [True, False])
+            plot_name=f"runtime-gated-linear-attention-forward-bs={batch_size}",  # Name for the plot, used also as a file name for saving the plot.
+            args={'batch_size': batch_size},
+        ) for batch_size in batch_sizes
     ]
     benchmark_reports_memory = [
         triton.testing.Benchmark(
@@ -132,9 +132,9 @@ if __name__ == "__main__":
             # Line styles
             styles=[('green', '-'), ('blue', '-')],
             ylabel="VRAM (MB) From Call",  # Label name for the y-axis
-            plot_name=f"memory-gated-linear-attention-{'inference' if no_grad else 'forward'}-bs={batch_size}",  # Name for the plot, used also as a file name for saving the plot.
-            args={'batch_size': batch_size, 'no_grad': no_grad},
-        ) for batch_size, no_grad in itertools.product(batch_sizes, [True, False])
+            plot_name=f"memory-gated-linear-attention-forward-bs={batch_size}",  # Name for the plot, used also as a file name for saving the plot.
+            args={'batch_size': batch_size},
+        ) for batch_size in batch_sizes
     ]
     
     benchmark_runtime = triton.testing.perf_report(benchmark_reports_runtime)(benchmark_forward_runtime)
@@ -144,5 +144,5 @@ if __name__ == "__main__":
     # with triton.testing.set_gpu_clock():
     # run manually: sudo nvidia-smi -i 0 --lock-gpu-clocks=1350,1350
     # Note this also warmups the autotuning cache for runtime
-    benchmark_memory.run(show_plots=True, print_data=True, save_path='outputs/')
-    # benchmark_runtime.run(show_plots=True, print_data=True, save_path='outputs/')
+    # benchmark_memory.run(show_plots=True, print_data=True, save_path='outputs/')
+    benchmark_runtime.run(show_plots=True, print_data=True, save_path='outputs/')
