@@ -293,10 +293,6 @@ def calculate_linear_tile(
     for k in range(0, k_tiles):
         T_in = tl.load(in_load_ptrs, mask=offs_k[None, :] <= K - k * BLOCK_SIZE_K - 1, other=0.0) 
         T_weight = tl.load(weight_load_ptrs, mask=offs_k[None, :] <= K - k * BLOCK_SIZE_K - 1, other=0.0)        
-        
-        # TODO: think about memory implications of transpose 
-        # Pro: slightly different ordering of loops is faster
-        # Con: using tl.dot probably allows Tensorcore out of box
         accumulator += tl.dot(T_in, tl.trans(T_weight))
         in_load_ptrs += BLOCK_SIZE_K * stride_in_k
         weight_load_ptrs += BLOCK_SIZE_K * stride_weight_k
