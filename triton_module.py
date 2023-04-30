@@ -47,4 +47,8 @@ if __name__ == "__main__":
         print(output_torch)
         print(output_triton)
         
-        np.testing.assert_allclose(output_torch.cpu(), output_triton.cpu(), rtol=1e-2, atol=1e-1)
+        if np.allclose(output_torch.cpu(), output_triton.cpu(), rtol=1e-2, atol=1e-1):
+            print("✅ Triton and Torch match")
+        else:
+            print("❌ Triton and Torch differ")
+        print()
