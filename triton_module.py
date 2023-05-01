@@ -24,26 +24,35 @@ class TransformerGatedLinearLayerFunction(torch.autograd.Function):
         
     @staticmethod
     def backward(ctx, grad_output) -> Any:
+        # TODO
         input_tensor, weight_tensor = ctx.saved_tensors
         
         x = input_tensor @ weight_tensor.T
         x1, x2 = x.chunk(2, dim=(x.ndim - 1))
-        w1, w2 = weight_tensor.chunk(2, dim=0)
-
+        two_N = weight_tensor.shape[0]
+        N = two_N // 2
+        w1 = weight_tensor[:N]
+        w2 = weight_tensor[N:]
+        
         # weight calculation
-        weight1_grad = input_tensor.T @ (grad_output * gelu_fast(x2))
-        weight2_grad = input_tensor.T @ (grad_output * x1 * derivative_gelu_fast(x2))
-        weight_grad = torch.cat([weight1_grad.T, weight2_grad.T], dim=0)
+        weight_grad = torch.cat(
+            [
+                input_tensor.T @ (grad_output * gelu_fast(x2)), 
+                input_tensor.T @ (grad_output * x1 * derivative_gelu_fast(x2))
+            ], 
+            dim=1
+        ).T
         
         # bias calculation
-        bias1_grad = gelu_fast(x2) * grad_output
-        bias2_grad = x1 * derivative_gelu_fast(x2) * gelu_fast(torch.tensor([1], dtype=x1.dtype, device=x1.device)) * grad_output
-        bias_grad = torch.cat([bias1_grad.sum(0).squeeze() , bias2_grad.sum(0).squeeze()], dim=0)
+        bias_grad = torch.cat([
+                (gelu_fast(x2) * grad_output).sum(0).squeeze(), 
+                (x1 * derivative_gelu_fast(x2) * gelu_fast(torch.tensor([1], dtype=x1.dtype, device=x1.device)) * grad_output).sum(0).squeeze()
+            ], 
+            dim=0
+        )
         
         # input calculation
-        input_grad = (grad_output * gelu_fast(x2)) @ w1
-        input_grad += (grad_output * derivative_gelu_fast(x2) * x1) @ w2 
-        
+        input_grad = (grad_output * gelu_fast(x2)) @ w1 + (grad_output * derivative_gelu_fast(x2) * x1) @ w2 
         return input_grad, weight_grad, bias_grad
         
         
