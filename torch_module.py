@@ -21,7 +21,7 @@ def derivative_gelu_fast(x: torch.Tensor) -> torch.Tensor:
         )
 
 class BaseTransformerGatedLinearLayer(nn.Module):
-    def __init__(self, dimension_in: int, projection_factor: int = 8, dtype: torch.dtype=torch.half) -> None:
+    def __init__(self, dimension_in: int, projection_factor: int = 8, dtype: torch.dtype=torch.half, init_non_zero_bias=True) -> None:
         super().__init__()
         
         if projection_factor % 2 != 0 or projection_factor < 2:
@@ -30,6 +30,9 @@ class BaseTransformerGatedLinearLayer(nn.Module):
         self.dimension_in = dimension_in
         self.projection_factor = projection_factor
         self.linear = nn.Linear(self.dimension_in, self.dimension_in * self.projection_factor, bias=True, dtype=dtype)
+
+        if init_non_zero_bias:
+            torch.nn.init.uniform_(self.linear.bias)
         
     def forward(self, x: torch.Tensor):
         """Expect x to be shape [batch, dimension_in]."""

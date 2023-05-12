@@ -135,13 +135,13 @@ if __name__ == "__main__":
     loss_triton.backward()
     loss_torch.backward()
     print("Grad weight: ")
-    print_is_close(torch_layer.linear.weight.grad, triton_layer.weight.grad, atol=0.25, rtol=0.5)
+    print_is_close(torch_layer.linear.weight.grad, triton_layer.weight.grad, atol=0.01, rtol=0.01)
     print()
 
     print("Grad bias: ")
-    print_is_close(torch_layer.linear.bias.grad, triton_layer.bias.grad, atol=0.25, rtol=0.5)
+    print_is_close(torch_layer.linear.bias.grad, triton_layer.bias.grad, atol=0.01, rtol=0.01)
     print()
     
     print("Grad input: ")
-    print_is_close(input_tensor_torch.grad, input_tensor_triton.grad, atol=0.25, rtol=0.5)
+    print_is_close(input_tensor_torch.grad, input_tensor_triton.grad, atol=0.01, rtol=0.01)
     print()
