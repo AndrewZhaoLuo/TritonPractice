@@ -238,39 +238,31 @@ def calculate_dual_linear_tile_fused(
     offs_in_m = (pid_tile_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)) % M
     offs_weight_n = (pid_tile_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)) % N
     offs_k = tl.arange(0, BLOCK_SIZE_K)    
+
     in_load_ptrs = in_ptr + (offs_in_m[:, None] * stride_in_m + offs_k[None, :] * stride_in_k)
     weight1_load_ptrs = weight1_ptr + (offs_weight_n[:, None] * stride_weight_n + offs_k[None, :] * stride_weight_k)
     weight2_load_ptrs = weight2_ptr + (offs_weight_n[:, None] * stride_weight_n + offs_k[None, :] * stride_weight_k)
     for k in range(0, k_tiles):
         # Calculate x1 and x2 subanswers at the same time
         T_in = tl.load(in_load_ptrs, mask=offs_k[None, :] < K - k * BLOCK_SIZE_K, other=0.0) 
-        
-        # NOTE: if in the mask you do `< K - k * BLOCK_SIZE_K` instead, it will fail to type check in triton 
-        # git+4b072516e7660d4e1cacea2b03371886ed88e81a and silently give you NaNs in 2.0.0
-        # TODO: file a bug report after creating more reproducible example.
-        T_weight1 = tl.load(weight1_load_ptrs, mask=offs_k[None, :] <= K - k * BLOCK_SIZE_K - 1, other=0.0)        
-        T_weight2 = tl.load(weight2_load_ptrs, mask=offs_k[None, :] <= K - k * BLOCK_SIZE_K - 1, other=0.0)        
+        T_weight1 = tl.load(weight1_load_ptrs, mask=offs_k[None, :] < K - k * BLOCK_SIZE_K, other=0.0)        
+        T_weight2 = tl.load(weight2_load_ptrs, mask=offs_k[None, :] < K - k * BLOCK_SIZE_K, other=0.0)        
 
-        # TODO: think about memory implications of transpose 
-        # Pro: slightly different ordering of loops is faster
-        # Con: using tl.dot probably allows Tensorcore out of box
-        #      tl.dot might already support this
-        result_out1 = tl.dot(T_in, T_weight1.T)
-        result_out2 = tl.dot(T_in, T_weight2.T)
-        accumulator1 += result_out1
-        accumulator2 += result_out2
+        accumulator1 += tl.dot(T_in, T_weight1.T)
+        accumulator2 += tl.dot(T_in, T_weight2.T)
 
         in_load_ptrs += BLOCK_SIZE_K * stride_in_k
         weight1_load_ptrs += BLOCK_SIZE_K * stride_weight_k
         weight2_load_ptrs += BLOCK_SIZE_K * stride_weight_k
     
     # Handle bias
-    offs_bias = pid_tile_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
+    offs_bias = (pid_tile_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)) % N
     offs_bias = offs_bias[None, :]
+    
     bias1_load_ptrs = bias1_ptr + (offs_bias * stride_bias_n)
     bias2_load_ptrs = bias2_ptr + (offs_bias * stride_bias_n)
-    T_bias1 = tl.load(bias1_load_ptrs, mask=offs_bias < N, other=0.0)     
-    T_bias2 = tl.load(bias2_load_ptrs, mask=offs_bias < N, other=0.0)     
+    T_bias1 = tl.load(bias1_load_ptrs)     
+    T_bias2 = tl.load(bias2_load_ptrs)     
     
     accumulator1 += T_bias1
     accumulator2 += T_bias2    
@@ -279,7 +271,7 @@ def calculate_dual_linear_tile_fused(
         
 @triton.jit
 def fast_gelu_kernel(buffer):
-    return 0.5 * buffer * (1.0 + tl.math.tanh(SQRT_2_OVERPI * buffer * (1.0 + FAST_GELU_INNER_CONST * buffer * buffer)))
+    return 0.5 * buffer * (1.0 + tl.libdevice.tanh(SQRT_2_OVERPI * buffer * (1.0 + FAST_GELU_INNER_CONST * buffer * buffer)))
 
 @triton.jit 
 def derivate_fast_gelu_kernel(buffer):
@@ -289,7 +281,7 @@ def derivate_fast_gelu_kernel(buffer):
     x = buffer
     return 0.5 * (torch.tanh(a * x * (b * x * x + 1)) + 1) + (
             0.5 * x * (2 * a * b * x * x + a * (b * x * x + 1)) * (
-                1 / tl.math.cosh(a * x * (b * x * x + 1))
+                1 / tl.libdevice.cosh(a * x * (b * x * x + 1))
             ) ** 2
         )
 
@@ -311,7 +303,7 @@ def run_test_case_forward():
         print(f"M: {m:<6} 2N: {two_n:<6} K: {k:<6}")
         T_in = torch.randn((m, k), device='cuda', dtype=torch.float16)
         T_weight = torch.randn((two_n, k), device='cuda', dtype=torch.float16)
-        T_bias = torch.randn((two_n,), device='cuda', dtype=torch.float16) 
+        T_bias = torch.randn((two_n,), device='cuda', dtype=torch.float16)
         
         triton_output = transformer_gated_linear_forward(T_in, T_weight, T_bias, kernel_launch_parameters=kernel_launch_parameters)
         torch_output = T_in.float() @ T_weight.T.float() + T_bias.float()
