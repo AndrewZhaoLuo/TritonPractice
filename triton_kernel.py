@@ -235,8 +235,8 @@ def calculate_dual_linear_tile_fused(
 ):
     """Calculates the tile at (pid_tile_m, pid_tile_n)"""
     k_tiles = tl.cdiv(K, BLOCK_SIZE_K)
-    offs_in_m = (pid_tile_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)) % M
-    offs_weight_n = (pid_tile_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)) % N
+    offs_in_m = tl.minimum((pid_tile_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)), M - 1)
+    offs_weight_n = tl.minimum(pid_tile_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N), N - 1)
     offs_k = tl.arange(0, BLOCK_SIZE_K)    
 
     in_load_ptrs = in_ptr + (offs_in_m[:, None] * stride_in_m + offs_k[None, :] * stride_in_k)
@@ -256,9 +256,9 @@ def calculate_dual_linear_tile_fused(
         weight2_load_ptrs += BLOCK_SIZE_K * stride_weight_k
     
     # Handle bias
-    offs_bias = (pid_tile_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)) % N
+    offs_bias = tl.minimum(pid_tile_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N), N - 1)
     offs_bias = offs_bias[None, :]
-    
+
     bias1_load_ptrs = bias1_ptr + (offs_bias * stride_bias_n)
     bias2_load_ptrs = bias2_ptr + (offs_bias * stride_bias_n)
     T_bias1 = tl.load(bias1_load_ptrs)     
@@ -297,8 +297,7 @@ def print_is_all_close(triton_tensor, torch_tensor, atol=1e-1, rtol=1e-1):
     print()
     
 def run_test_case_forward():
-    kernel_launch_parameters = KernelLaunchParameters(block_size_m=16, block_size_n=64, block_size_k=16, group_size_m=1)
-    kernel_launch_parameters = None
+    kernel_launch_parameters = KernelLaunchParameters(block_size_m=16, block_size_n=16, block_size_k=16, group_size_m=1)
     def run_case(m, two_n, k):
         print(f"M: {m:<6} 2N: {two_n:<6} K: {k:<6}")
         T_in = torch.randn((m, k), device='cuda', dtype=torch.float16)
