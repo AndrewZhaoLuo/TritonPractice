@@ -15,7 +15,7 @@ class TransformerGatedLinearLayerFunction(torch.autograd.Function):
         weight_tensor, 
         bias_tensor
     ):
-        ctx.save_for_backward(input_tensor, weight_tensor)
+        ctx.save_for_backward(input_tensor, weight_tensor, bias_tensor)
         return triton_kernel.transformer_gated_linear_forward(
             input_tensor, 
             weight_tensor, 
@@ -25,9 +25,13 @@ class TransformerGatedLinearLayerFunction(torch.autograd.Function):
     @staticmethod
     def backward(ctx, grad_output) -> Any:
         # TODO
-        input_tensor, weight_tensor = ctx.saved_tensors
+        input_tensor, weight_tensor, bias_tensor = ctx.saved_tensors
+
+        input_tensor = input_tensor.float()
+        weight_tensor = weight_tensor.float()
         
-        x = input_tensor @ weight_tensor.T
+        x = input_tensor @ weight_tensor.T 
+        x += bias_tensor
         x1, x2 = x.chunk(2, dim=(x.ndim - 1))
         two_N = weight_tensor.shape[0]
         N = two_N // 2
@@ -46,14 +50,14 @@ class TransformerGatedLinearLayerFunction(torch.autograd.Function):
         # bias calculation
         bias_grad = torch.cat([
                 (gelu_fast(x2) * grad_output).sum(0).squeeze(), 
-                (x1 * derivative_gelu_fast(x2) * gelu_fast(torch.tensor([1], dtype=x1.dtype, device=x1.device)) * grad_output).sum(0).squeeze()
+                (x1 * derivative_gelu_fast(x2) * grad_output).sum(0).squeeze()
             ], 
             dim=0
         )
         
         # input calculation
         input_grad = (grad_output * gelu_fast(x2)) @ w1 + (grad_output * derivative_gelu_fast(x2) * x1) @ w2 
-        return input_grad, weight_grad, bias_grad
+        return input_grad.half(), weight_grad.half(), bias_grad.half()
         
         
 class OptimizedTransformerGatedLinearLayer(nn.Module):
@@ -98,50 +102,50 @@ if __name__ == "__main__":
     parser.add_argument("--input-dim", type=int, required=True)
     parser.add_argument("--batch-size", type=int, required=True)
     parser.add_argument("--seed", type=int, default=None)
-    parser.add_argument("--warmup", type=int, default=10)
-    parser.add_argument("--repeats", type=int, default=100)
+    parser.add_argument("--repeats", type=int, default=10)
     args = parser.parse_args()
     
     repeats = args.repeats
-    warmups = args.warmup
     
     if args.seed is not None:
         torch.manual_seed(args.seed)
     
-    input_tensor = torch.randn(args.batch_size, args.input_dim, dtype=torch.half, requires_grad=True)
-    torch_layer = BaseTransformerGatedLinearLayer(args.input_dim)
-    triton_layer = OptimizedTransformerGatedLinearLayer.from_torch(torch_layer)
-    
-    input_tensor = input_tensor.to('cuda')
-    torch_layer = torch_layer.to('cuda')
-    triton_layer = triton_layer.to('cuda')
+    for i in range(repeats):
+        print(f"******Iteration {i}******")
+        input_tensor = torch.randn(args.batch_size, args.input_dim, dtype=torch.half, requires_grad=True)
+        torch_layer = BaseTransformerGatedLinearLayer(args.input_dim, init_non_zero_bias=True)
+        triton_layer = OptimizedTransformerGatedLinearLayer.from_torch(torch_layer)
         
-    input_tensor_torch = input_tensor.clone()
-    input_tensor_torch.retain_grad()
-    input_tensor_triton = input_tensor.clone()
-    input_tensor_triton.retain_grad()
-    forward_torch = torch_layer(input_tensor_torch)
-    forward_triton = triton_layer(input_tensor_triton)
-    
-    print("****Forward****")
-    print("Forward tensor: ")
-    print_is_close(forward_torch, forward_triton)
-    print()
-    
-    print("****Backward****")
-    loss_fn = lambda tensor: (tensor - torch.ones_like(tensor)).pow(2).sum()
-    loss_torch = loss_fn(forward_torch)
-    loss_triton = loss_fn(forward_triton)
-    loss_triton.backward()
-    loss_torch.backward()
-    print("Grad weight: ")
-    print_is_close(torch_layer.linear.weight.grad, triton_layer.weight.grad, atol=0.01, rtol=0.01)
-    print()
+        input_tensor = input_tensor.to('cuda')
+        torch_layer = torch_layer.to('cuda')
+        triton_layer = triton_layer.to('cuda')
+            
+        input_tensor_torch = input_tensor.clone()
+        input_tensor_torch.retain_grad()
+        input_tensor_triton = input_tensor.clone()
+        input_tensor_triton.retain_grad()
+        forward_torch = torch_layer(input_tensor_torch)
+        forward_triton = triton_layer(input_tensor_triton)
+        
+        print("****Forward****")
+        print("Forward tensor: ")
+        print_is_close(forward_torch, forward_triton)
+        print()
+        
+        print("****Backward****")
+        loss_fn = lambda tensor: torch.sum(tensor) # (tensor - torch.ones_like(tensor)).pow(2).sum()
+        loss_torch = loss_fn(forward_torch)
+        loss_triton = loss_fn(forward_triton)
+        loss_triton.backward()
+        loss_torch.backward()
+        print("Grad weight: ")
+        print_is_close(torch_layer.linear.weight.grad, triton_layer.weight.grad, atol=0.01, rtol=0.01)
+        print()
 
-    print("Grad bias: ")
-    print_is_close(torch_layer.linear.bias.grad, triton_layer.bias.grad, atol=0.01, rtol=0.01)
-    print()
-    
-    print("Grad input: ")
-    print_is_close(input_tensor_torch.grad, input_tensor_triton.grad, atol=0.01, rtol=0.01)
-    print()
+        print("Grad bias: ")
+        print_is_close(torch_layer.linear.bias.grad, triton_layer.bias.grad, atol=0.01, rtol=0.01)
+        print()
+        
+        print("Grad input: ")
+        print_is_close(input_tensor_torch.grad, input_tensor_triton.grad, atol=0.01, rtol=0.01)
+        print()
