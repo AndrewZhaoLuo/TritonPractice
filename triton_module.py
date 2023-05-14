@@ -25,7 +25,7 @@ class TransformerGatedLinearLayerFunction(torch.autograd.Function):
         
     @staticmethod
     def backward(ctx, grad_output) -> Any:
-        # TODO
+        # TODO: write fused triton kernels.
         input_tensor, weight_tensor, bias_tensor = ctx.saved_tensors
 
         input_tensor = input_tensor.float()

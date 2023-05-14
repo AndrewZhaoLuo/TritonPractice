@@ -230,7 +230,7 @@ def calculate_dual_linear_tile_fused(
         
 @triton.jit
 def fast_gelu_kernel(buffer):
-    return 0.5 * buffer * (1.0 + tl.libdevice.tanh(SQRT_2_OVERPI * buffer * (1.0 + FAST_GELU_INNER_CONST * buffer * buffer)))
+    return 0.5 * buffer * (1.0 + tl.math.tanh(SQRT_2_OVERPI * buffer * (1.0 + FAST_GELU_INNER_CONST * buffer * buffer)))
 
 @triton.jit 
 def derivate_fast_gelu_kernel(buffer):
@@ -238,10 +238,10 @@ def derivate_fast_gelu_kernel(buffer):
     a = SQRT_2_OVERPI
     b = FAST_GELU_INNER_CONST
     x = buffer
-    return 0.5 * (tl.libdevice.tanh(a * x * (b * x * x + 1)) + 1) + (
+    return 0.5 * (tl.math.tanh(a * x * (b * x * x + 1)) + 1) + (
             0.5 * x * (2 * a * b * x * x + a * (b * x * x + 1)) * 
-            tl.libdevice.pow(
-                1 / tl.libdevice.cosh(a * x * (b * x * x + 1)),
+            tl.math.pow(
+                1 / tl.math.cosh(a * x * (b * x * x + 1)),
                 2
             )
         )

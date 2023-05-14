@@ -33,7 +33,7 @@ def _benchmark_runtime(func: Callable, no_grad: bool = False, warmup: int = 25, 
         with ExitStack() as stack:
             if no_grad:
                 stack.enter_context(torch.no_grad())
-            return triton.testing.do_bench(func, quantiles=QUANTILES_TO_REPORT, warmup=warmup, rep=rep)
+            return triton.testing.do_bench(func, percentiles=QUANTILES_TO_REPORT, warmup=warmup, rep=rep)
     except RuntimeError as e:
         if is_cuda_oom_err(e):
             return None

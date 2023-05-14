@@ -28,7 +28,7 @@ def transformer_gated_linear_backward_weight_grad(
     assert list(grad_output_tensor.shape) == [M, N], "Not compatible dimensions"
     
     # Allocates output.
-    weight_grad_tensor = torch.empty((two_N, n), device=input_tensor.device, dtype=input_tensor.dtype)  
+    weight_grad_tensor = torch.zeros((two_N, n), device=input_tensor.device, dtype=input_tensor.dtype)
     grid = lambda META: (
         triton.cdiv(N, META['BLOCK_SIZE_N']) * triton.cdiv(n, META['BLOCK_SIZE_n']),
     )
@@ -106,7 +106,8 @@ def transformer_gated_linear_backward_kernel_weights(
         )
     ```
 
-    Each pid essentially calculates one block of w1 and w2 each
+    Each pid essentially calculates one block of w1 and w2 each. 
+    Each pid reuses the corresponding tiles input_tensor, x2, and grad_output.
     """
     
     pid = tl.program_id(axis=0)
@@ -131,7 +132,7 @@ def transformer_gated_linear_backward_kernel_weights(
     if pid_tile_N == 0 and pid_tile_n == 0:
         accumulator_w1_grad = tl.zeros((BLOCK_SIZE_N, BLOCK_SIZE_n), dtype=tl.float32)    
         accumulator_w2_grad = tl.zeros((BLOCK_SIZE_N, BLOCK_SIZE_n), dtype=tl.float32)    
-
+        
         x1_ptr = x_ptr 
         x2_ptr = x_ptr + N * stride_x_N
 
@@ -143,22 +144,19 @@ def transformer_gated_linear_backward_kernel_weights(
         x2_load_ptrs = x2_ptr + (offsets_M[:, None] * stride_x_M + offsets_N[None, :] * stride_x_N)
         grad_output_load_ptrs = grad_output_ptr + (offsets_M[:, None] * stride_grad_output_M + offsets_N[None, :] * stride_grad_output_N)
         input_tensor_load_ptrs = input_tensor_ptr + (offsets_M[:, None] * stride_input_M + offsets_n[None, :] * stride_input_n)
-            
         M_tiles = tl.cdiv(M, BLOCK_SIZE_M)
+
         for tile_M in range(0, M_tiles):
-            # TODO: check this, only seems to work if batch size (M) is aligned with the block size...
             bound_M = tl.maximum(0, M - tile_M * BLOCK_SIZE_M)
-            #tl.printf("", offsets_M[:, None])
-            #tl.printf("*", bound_M)
             T_x1 = tl.load(x1_load_ptrs, mask=offsets_M[:, None] < bound_M, other=0.0) 
             T_x2 = tl.load(x2_load_ptrs, mask=offsets_M[:, None] < bound_M, other=0.0) 
             T_grad_output = tl.load(grad_output_load_ptrs, mask=offsets_M[:, None] < bound_M, other=0.0) 
             T_input_tensor = tl.load(input_tensor_load_ptrs, mask=offsets_M[:, None] < bound_M, other=0.0) 
-
-            left_side_w1 = T_grad_output * 0.0 + 1.0 # * fast_gelu_kernel(T_x2) 
+            
+            left_side_w1 = T_grad_output * fast_gelu_kernel(T_x2) 
             left_side_w2 = T_grad_output * T_x1 * derivate_fast_gelu_kernel(T_x2)
             accumulator_w1_grad += tl.dot(left_side_w1.T, T_input_tensor)
-            # accumulator_w2_grad += tl.dot(left_side_w2.T, T_input_tensor)
+            accumulator_w2_grad += tl.dot(left_side_w2.T, T_input_tensor)
 
             x1_load_ptrs += BLOCK_SIZE_M * stride_x_M
             x2_load_ptrs += BLOCK_SIZE_M * stride_x_M
