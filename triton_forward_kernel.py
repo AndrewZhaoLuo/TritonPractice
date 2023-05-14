@@ -1,104 +1,249 @@
-import torch 
-import triton 
-import triton.language as tl 
-from torch_module import SQRT_2_OVERPI, FAST_GELU_INNER_CONST, gelu_fast, derivative_gelu_fast
 import itertools
 from typing import NamedTuple, Optional
 
+import torch
+import triton.language as tl
+
+import triton
+from torch_module import FAST_GELU_INNER_CONST, SQRT_2_OVERPI, gelu_fast
+
+
 class KernelLaunchParameters(NamedTuple):
-    block_size_m: int 
-    block_size_n: int 
-    block_size_k: int 
+    block_size_m: int
+    block_size_n: int
+    block_size_k: int
     group_size_m: int
 
-def transformer_gated_linear_forward(input_tensor: torch.Tensor, weight_tensor: torch.Tensor, bias_tensor: torch.Tensor, kernel_launch_parameters: Optional[KernelLaunchParameters] = None, synchronize: bool = False) -> torch.Tensor:
+
+def transformer_gated_linear_forward(
+    input_tensor: torch.Tensor,
+    weight_tensor: torch.Tensor,
+    bias_tensor: torch.Tensor,
+    kernel_launch_parameters: Optional[KernelLaunchParameters] = None,
+) -> torch.Tensor:
     # Check constraints.
     assert len(bias_tensor.shape) == 1, "Bias should have one dimension"
-    assert bias_tensor.shape[0] == weight_tensor.shape[0], "Incompatible bias dimensions"
-    assert input_tensor.shape[1] == weight_tensor.shape[1], "Incompatible reduction dimensions"
+    assert (
+        bias_tensor.shape[0] == weight_tensor.shape[0]
+    ), "Incompatible bias dimensions"
+    assert (
+        input_tensor.shape[1] == weight_tensor.shape[1]
+    ), "Incompatible reduction dimensions"
     assert input_tensor.is_contiguous(), "Matrix A must be contiguous"
     assert weight_tensor.is_contiguous(), "Matrix B must be contiguous"
     M, K = input_tensor.shape
     two_N, K = weight_tensor.shape
-    
+
     assert two_N % 2 == 0, "Output dimension must be even."
     N = two_N // 2
-    
+
     # Allocates output.
-    output_tensor = torch.empty((M, N), device=input_tensor.device, dtype=input_tensor.dtype)        
-    grid = lambda META: (
-        triton.cdiv(M, META['BLOCK_SIZE_M']) * triton.cdiv(N, META['BLOCK_SIZE_N']),
+    output_tensor = torch.empty(
+        (M, N), device=input_tensor.device, dtype=input_tensor.dtype
     )
-      
+    grid = lambda META: (
+        triton.cdiv(M, META["BLOCK_SIZE_M"]) * triton.cdiv(N, META["BLOCK_SIZE_N"]),
+    )
+
     # TODO: figure out how autotuning works to make this cleaner
     if kernel_launch_parameters is not None:
         base_function = transformer_gated_linear_forward_kernel.fn
         base_function[grid](
-            input_tensor, 
-            weight_tensor, 
-            bias_tensor, 
+            input_tensor,
+            weight_tensor,
+            bias_tensor,
             output_tensor,
-            M, two_N, K,
-            input_tensor.stride(0), input_tensor.stride(1),
-            weight_tensor.stride(0), weight_tensor.stride(1),
-            bias_tensor.stride(0), 
-            output_tensor.stride(0), output_tensor.stride(1),
+            M,
+            two_N,
+            K,
+            input_tensor.stride(0),
+            input_tensor.stride(1),
+            weight_tensor.stride(0),
+            weight_tensor.stride(1),
+            bias_tensor.stride(0),
+            output_tensor.stride(0),
+            output_tensor.stride(1),
             kernel_launch_parameters.block_size_m,
             kernel_launch_parameters.block_size_n,
             kernel_launch_parameters.block_size_k,
-            kernel_launch_parameters.group_size_m
+            kernel_launch_parameters.group_size_m,
         )
     else:
         result = transformer_gated_linear_forward_kernel[grid](
-            input_tensor, 
-            weight_tensor, 
-            bias_tensor, 
+            input_tensor,
+            weight_tensor,
+            bias_tensor,
             output_tensor,
-            M, two_N, K,
-            input_tensor.stride(0), input_tensor.stride(1),
-            weight_tensor.stride(0), weight_tensor.stride(1),
-            bias_tensor.stride(0), 
-            output_tensor.stride(0), output_tensor.stride(1),
+            M,
+            two_N,
+            K,
+            input_tensor.stride(0),
+            input_tensor.stride(1),
+            weight_tensor.stride(0),
+            weight_tensor.stride(1),
+            bias_tensor.stride(0),
+            output_tensor.stride(0),
+            output_tensor.stride(1),
         )
         # print("Autotuned best:", result.metadata)
     return output_tensor
 
+
 #### Forward Kernel
 @triton.autotune(
-    configs=[        
-        triton.Config({'BLOCK_SIZE_M': 64, 'BLOCK_SIZE_N': 32, 'BLOCK_SIZE_K': 32, 'GROUP_SIZE_M': 8}, num_stages=5, num_warps=2),
-        triton.Config({'BLOCK_SIZE_M': 64, 'BLOCK_SIZE_N': 32, 'BLOCK_SIZE_K': 32, 'GROUP_SIZE_M': 8}, num_stages=4, num_warps=4),
-        triton.Config({'BLOCK_SIZE_M': 64, 'BLOCK_SIZE_N': 64, 'BLOCK_SIZE_K': 32, 'GROUP_SIZE_M': 8}, num_stages=4, num_warps=4),
-        triton.Config({'BLOCK_SIZE_M': 128, 'BLOCK_SIZE_N': 32, 'BLOCK_SIZE_K': 32, 'GROUP_SIZE_M': 8}, num_stages=4, num_warps=4),
-        triton.Config({'BLOCK_SIZE_M': 128, 'BLOCK_SIZE_N': 64, 'BLOCK_SIZE_K': 32, 'GROUP_SIZE_M': 8}, num_stages=4, num_warps=4),
-        triton.Config({'BLOCK_SIZE_M': 256, 'BLOCK_SIZE_N': 128, 'BLOCK_SIZE_K': 32, 'GROUP_SIZE_M': 8}, num_stages=4, num_warps=4),
-        triton.Config({'BLOCK_SIZE_M': 256, 'BLOCK_SIZE_N': 64, 'BLOCK_SIZE_K': 32, 'GROUP_SIZE_M': 8}, num_stages=4, num_warps=4),
-        triton.Config({'BLOCK_SIZE_M': 256, 'BLOCK_SIZE_N': 32, 'BLOCK_SIZE_K': 32, 'GROUP_SIZE_M': 8}, num_stages=4, num_warps=4),
-        
-        triton.Config({'BLOCK_SIZE_M': 128, 'BLOCK_SIZE_N': 256, 'BLOCK_SIZE_K': 64, 'GROUP_SIZE_M': 8}, num_stages=3, num_warps=8),
-        triton.Config({'BLOCK_SIZE_M': 64, 'BLOCK_SIZE_N': 256, 'BLOCK_SIZE_K': 32, 'GROUP_SIZE_M': 8}, num_stages=4, num_warps=4),
-        triton.Config({'BLOCK_SIZE_M': 128, 'BLOCK_SIZE_N': 128, 'BLOCK_SIZE_K': 32, 'GROUP_SIZE_M': 8}, num_stages=4, num_warps=4),
-        triton.Config({'BLOCK_SIZE_M': 64, 'BLOCK_SIZE_N': 128, 'BLOCK_SIZE_K': 32, 'GROUP_SIZE_M': 8}, num_stages=4, num_warps=4),
-        triton.Config({'BLOCK_SIZE_M': 32, 'BLOCK_SIZE_N': 64, 'BLOCK_SIZE_K': 32, 'GROUP_SIZE_M': 8}, num_stages=5, num_warps=2),
+    configs=[
+        triton.Config(
+            {
+                "BLOCK_SIZE_M": 64,
+                "BLOCK_SIZE_N": 32,
+                "BLOCK_SIZE_K": 32,
+                "GROUP_SIZE_M": 8,
+            },
+            num_stages=5,
+            num_warps=2,
+        ),
+        triton.Config(
+            {
+                "BLOCK_SIZE_M": 64,
+                "BLOCK_SIZE_N": 32,
+                "BLOCK_SIZE_K": 32,
+                "GROUP_SIZE_M": 8,
+            },
+            num_stages=4,
+            num_warps=4,
+        ),
+        triton.Config(
+            {
+                "BLOCK_SIZE_M": 64,
+                "BLOCK_SIZE_N": 64,
+                "BLOCK_SIZE_K": 32,
+                "GROUP_SIZE_M": 8,
+            },
+            num_stages=4,
+            num_warps=4,
+        ),
+        triton.Config(
+            {
+                "BLOCK_SIZE_M": 128,
+                "BLOCK_SIZE_N": 32,
+                "BLOCK_SIZE_K": 32,
+                "GROUP_SIZE_M": 8,
+            },
+            num_stages=4,
+            num_warps=4,
+        ),
+        triton.Config(
+            {
+                "BLOCK_SIZE_M": 128,
+                "BLOCK_SIZE_N": 64,
+                "BLOCK_SIZE_K": 32,
+                "GROUP_SIZE_M": 8,
+            },
+            num_stages=4,
+            num_warps=4,
+        ),
+        triton.Config(
+            {
+                "BLOCK_SIZE_M": 256,
+                "BLOCK_SIZE_N": 128,
+                "BLOCK_SIZE_K": 32,
+                "GROUP_SIZE_M": 8,
+            },
+            num_stages=4,
+            num_warps=4,
+        ),
+        triton.Config(
+            {
+                "BLOCK_SIZE_M": 256,
+                "BLOCK_SIZE_N": 64,
+                "BLOCK_SIZE_K": 32,
+                "GROUP_SIZE_M": 8,
+            },
+            num_stages=4,
+            num_warps=4,
+        ),
+        triton.Config(
+            {
+                "BLOCK_SIZE_M": 256,
+                "BLOCK_SIZE_N": 32,
+                "BLOCK_SIZE_K": 32,
+                "GROUP_SIZE_M": 8,
+            },
+            num_stages=4,
+            num_warps=4,
+        ),
+        triton.Config(
+            {
+                "BLOCK_SIZE_M": 128,
+                "BLOCK_SIZE_N": 256,
+                "BLOCK_SIZE_K": 64,
+                "GROUP_SIZE_M": 8,
+            },
+            num_stages=3,
+            num_warps=8,
+        ),
+        triton.Config(
+            {
+                "BLOCK_SIZE_M": 64,
+                "BLOCK_SIZE_N": 256,
+                "BLOCK_SIZE_K": 32,
+                "GROUP_SIZE_M": 8,
+            },
+            num_stages=4,
+            num_warps=4,
+        ),
+        triton.Config(
+            {
+                "BLOCK_SIZE_M": 128,
+                "BLOCK_SIZE_N": 128,
+                "BLOCK_SIZE_K": 32,
+                "GROUP_SIZE_M": 8,
+            },
+            num_stages=4,
+            num_warps=4,
+        ),
+        triton.Config(
+            {
+                "BLOCK_SIZE_M": 64,
+                "BLOCK_SIZE_N": 128,
+                "BLOCK_SIZE_K": 32,
+                "GROUP_SIZE_M": 8,
+            },
+            num_stages=4,
+            num_warps=4,
+        ),
+        triton.Config(
+            {
+                "BLOCK_SIZE_M": 32,
+                "BLOCK_SIZE_N": 64,
+                "BLOCK_SIZE_K": 32,
+                "GROUP_SIZE_M": 8,
+            },
+            num_stages=5,
+            num_warps=2,
+        ),
     ],
-    key=['M', 'two_N', 'K'],
+    key=["M", "two_N", "K"],
 )
-@triton.jit 
+@triton.jit
 def transformer_gated_linear_forward_kernel(
-    in_ptr, 
+    in_ptr,
     weight_ptr,
     bias_ptr,
     out_ptr,
     # Matrix dimensions
-    M, 
+    M,
     two_N,
     K,
-    stride_in_m, stride_in_k,
-    stride_weight_n, stride_weight_k,
+    stride_in_m,
+    stride_in_k,
+    stride_weight_n,
+    stride_weight_k,
     stride_bias_n,
-    stride_out_m, stride_out_n,
+    stride_out_m,
+    stride_out_n,
     # Meta-parameters
-    ## Shared-Memory Blocking 
+    ## Shared-Memory Blocking
     BLOCK_SIZE_M: tl.constexpr,
     BLOCK_SIZE_N: tl.constexpr,
     BLOCK_SIZE_K: tl.constexpr,
@@ -106,12 +251,12 @@ def transformer_gated_linear_forward_kernel(
     GROUP_SIZE_M: tl.constexpr,
 ):
     """Calculates the equivalent of the following:
-    
+
     T_in     : [M, K]
     T_weight : [2N, K]
     T_bias   : [2N]
     T_out    : [M, N]
-    
+
     T_weight1 = T_weight[:N,:]
     T_bias1 = T_bias[:N]
     T_weight2 = T_weight[N:,:]
@@ -121,37 +266,37 @@ def transformer_gated_linear_forward_kernel(
     x2: [M, N] = T_in @ T_weight2.T + T_bias2
 
     T_out = x1 * fast_gelu(x2)
-    
+
     We do this by calculating buf = fast_gelu(x2) in tiles.
-    We then calculate x1's corresponding tiles and then do 
-    x1 * buf with these two pieces in shared memory. We note that 
-    the corresponding tiles for x1 and x2 share accesses in the input 
+    We then calculate x1's corresponding tiles and then do
+    x1 * buf with these two pieces in shared memory. We note that
+    the corresponding tiles for x1 and x2 share accesses in the input
     tensor so we fuse this to avoid an additional access to T_in.
     """
-    
+
     pid = tl.program_id(axis=0)
     N = two_N // 2
-    
+
     # Calculate tiling structures for subproblems calculating x1 and x2
     m_tiles = tl.cdiv(M, BLOCK_SIZE_M)
     n_tiles = tl.cdiv(N, BLOCK_SIZE_N)
-        
+
     # L2 blocking by group
     num_pid_in_group = GROUP_SIZE_M * n_tiles
-    group_number = pid // num_pid_in_group 
+    group_number = pid // num_pid_in_group
     group_start_pid = group_number * GROUP_SIZE_M
     group_size_m = min(m_tiles - group_start_pid, GROUP_SIZE_M)
-    
+
     # Map final output tile indices
     pid_tile_m = group_start_pid + (pid % group_size_m)
     pid_tile_n = (pid % num_pid_in_group) // group_size_m
 
     # Part 1 + 2: calculate x1 and x2 tile in parallel
     # TODO: bias leads to NaN, figure out why???
-    accumulator_x1 = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=tl.float32)    
+    accumulator_x1 = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=tl.float32)
     weight1_ptr = weight_ptr
     bias1_ptr = bias_ptr
-    accumulator_x2 = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=tl.float32)    
+    accumulator_x2 = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=tl.float32)
     weight2_ptr = weight_ptr + N * stride_weight_n
     bias2_ptr = bias_ptr + N * stride_bias_n
     accumulator_x1, accumulator_x2 = calculate_dual_linear_tile_fused(
@@ -161,14 +306,20 @@ def transformer_gated_linear_forward_kernel(
         weight1_ptr,
         weight2_ptr,
         bias1_ptr,
-        bias2_ptr, 
-        pid_tile_m, 
-        pid_tile_n, 
-        M, N, K, 
-        stride_in_m, stride_in_k, 
-        stride_weight_n, stride_weight_k, 
+        bias2_ptr,
+        pid_tile_m,
+        pid_tile_n,
+        M,
+        N,
+        K,
+        stride_in_m,
+        stride_in_k,
+        stride_weight_n,
+        stride_weight_k,
         stride_bias_n,
-        BLOCK_SIZE_M, BLOCK_SIZE_N, BLOCK_SIZE_K
+        BLOCK_SIZE_M,
+        BLOCK_SIZE_N,
+        BLOCK_SIZE_K,
     )
 
     # Part 3: combine the results
@@ -178,43 +329,70 @@ def transformer_gated_linear_forward_kernel(
     out = accumulator_x1.to(tl.float16)
     offs_out_m = pid_tile_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
     offs_out_n = pid_tile_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
-    out_ptrs = out_ptr + stride_out_m * offs_out_m[:, None] + stride_out_n * offs_out_n[None, :]
+    out_ptrs = (
+        out_ptr
+        + stride_out_m * offs_out_m[:, None]
+        + stride_out_n * offs_out_n[None, :]
+    )
     mask = (offs_out_m[:, None] < M) & (offs_out_n[None, :] < N)
     tl.store(out_ptrs, out, mask=mask)
+
 
 @triton.jit
 def calculate_dual_linear_tile_fused(
     accumulator1,
-    accumulator2, 
+    accumulator2,
     in_ptr,
     weight1_ptr,
     weight2_ptr,
     bias1_ptr,
     bias2_ptr,
-    pid_tile_m, 
-    pid_tile_n, 
+    pid_tile_m,
+    pid_tile_n,
     # Dimensions for iterating
-    M, N, K, 
-    stride_in_m, stride_in_k,
-    stride_weight_n, stride_weight_k,
+    M,
+    N,
+    K,
+    stride_in_m,
+    stride_in_k,
+    stride_weight_n,
+    stride_weight_k,
     stride_bias_n,
     # Block size information
-    BLOCK_SIZE_M, BLOCK_SIZE_N, BLOCK_SIZE_K
+    BLOCK_SIZE_M,
+    BLOCK_SIZE_N,
+    BLOCK_SIZE_K,
 ):
     """Calculates the tile at (pid_tile_m, pid_tile_n), concurrently finding corresponding elemwise"""
     k_tiles = tl.cdiv(K, BLOCK_SIZE_K)
-    offs_in_m = tl.minimum((pid_tile_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)), M - 1)
-    offs_weight_n = tl.minimum(pid_tile_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N), N - 1)
-    offs_k = tl.arange(0, BLOCK_SIZE_K)    
+    offs_in_m = tl.minimum(
+        (pid_tile_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)), M - 1
+    )
+    offs_weight_n = tl.minimum(
+        pid_tile_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N), N - 1
+    )
+    offs_k = tl.arange(0, BLOCK_SIZE_K)
 
-    in_load_ptrs = in_ptr + (offs_in_m[:, None] * stride_in_m + offs_k[None, :] * stride_in_k)
-    weight1_load_ptrs = weight1_ptr + (offs_weight_n[:, None] * stride_weight_n + offs_k[None, :] * stride_weight_k)
-    weight2_load_ptrs = weight2_ptr + (offs_weight_n[:, None] * stride_weight_n + offs_k[None, :] * stride_weight_k)
+    in_load_ptrs = in_ptr + (
+        offs_in_m[:, None] * stride_in_m + offs_k[None, :] * stride_in_k
+    )
+    weight1_load_ptrs = weight1_ptr + (
+        offs_weight_n[:, None] * stride_weight_n + offs_k[None, :] * stride_weight_k
+    )
+    weight2_load_ptrs = weight2_ptr + (
+        offs_weight_n[:, None] * stride_weight_n + offs_k[None, :] * stride_weight_k
+    )
     for k in range(0, k_tiles):
         # Calculate x1 and x2 subanswers at the same time
-        T_in = tl.load(in_load_ptrs, mask=offs_k[None, :] < K - k * BLOCK_SIZE_K, other=0.0) 
-        T_weight1 = tl.load(weight1_load_ptrs, mask=offs_k[None, :] < K - k * BLOCK_SIZE_K, other=0.0)        
-        T_weight2 = tl.load(weight2_load_ptrs, mask=offs_k[None, :] < K - k * BLOCK_SIZE_K, other=0.0)        
+        T_in = tl.load(
+            in_load_ptrs, mask=offs_k[None, :] < K - k * BLOCK_SIZE_K, other=0.0
+        )
+        T_weight1 = tl.load(
+            weight1_load_ptrs, mask=offs_k[None, :] < K - k * BLOCK_SIZE_K, other=0.0
+        )
+        T_weight2 = tl.load(
+            weight2_load_ptrs, mask=offs_k[None, :] < K - k * BLOCK_SIZE_K, other=0.0
+        )
 
         accumulator1 += tl.dot(T_in, T_weight1.T)
         accumulator2 += tl.dot(T_in, T_weight2.T)
@@ -222,38 +400,51 @@ def calculate_dual_linear_tile_fused(
         in_load_ptrs += BLOCK_SIZE_K * stride_in_k
         weight1_load_ptrs += BLOCK_SIZE_K * stride_weight_k
         weight2_load_ptrs += BLOCK_SIZE_K * stride_weight_k
-    
+
     # Handle bias
-    offs_bias = tl.minimum(pid_tile_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N), N - 1)
+    offs_bias = tl.minimum(
+        pid_tile_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N), N - 1
+    )
     offs_bias = offs_bias[None, :]
 
     bias1_load_ptrs = bias1_ptr + (offs_bias * stride_bias_n)
     bias2_load_ptrs = bias2_ptr + (offs_bias * stride_bias_n)
-    T_bias1 = tl.load(bias1_load_ptrs)     
-    T_bias2 = tl.load(bias2_load_ptrs)     
-    
+    T_bias1 = tl.load(bias1_load_ptrs)
+    T_bias2 = tl.load(bias2_load_ptrs)
+
     accumulator1 += T_bias1
-    accumulator2 += T_bias2    
+    accumulator2 += T_bias2
 
     return accumulator1, accumulator2
-        
+
+
 @triton.jit
 def fast_gelu_kernel(buffer):
-    return 0.5 * buffer * (1.0 + tl.math.tanh(SQRT_2_OVERPI * buffer * (1.0 + FAST_GELU_INNER_CONST * buffer * buffer)))
+    return (
+        0.5
+        * buffer
+        * (
+            1.0
+            + tl.math.tanh(
+                SQRT_2_OVERPI * buffer * (1.0 + FAST_GELU_INNER_CONST * buffer * buffer)
+            )
+        )
+    )
 
-@triton.jit 
+
+@triton.jit
 def derivate_fast_gelu_kernel(buffer):
     # Courtesy of wolfram alpha
     a = SQRT_2_OVERPI
     b = FAST_GELU_INNER_CONST
     x = buffer
     return 0.5 * (tl.math.tanh(a * x * (b * x * x + 1)) + 1) + (
-            0.5 * x * (2 * a * b * x * x + a * (b * x * x + 1)) * 
-            tl.math.pow(
-                1 / tl.math.cosh(a * x * (b * x * x + 1)),
-                2
-            )
-        )
+        0.5
+        * x
+        * (2 * a * b * x * x + a * (b * x * x + 1))
+        * tl.math.pow(1 / tl.math.cosh(a * x * (b * x * x + 1)), 2)
+    )
+
 
 def print_is_all_close(triton_tensor, torch_tensor, atol=1e-1, rtol=1e-1):
     if torch.allclose(torch_tensor, triton_tensor, atol=atol, rtol=rtol):
@@ -265,35 +456,43 @@ def print_is_all_close(triton_tensor, torch_tensor, atol=1e-1, rtol=1e-1):
         print("Torch")
         print(torch_tensor)
     print()
-    
+
+
 def run_test_case_forward():
-    kernel_launch_parameters = KernelLaunchParameters(block_size_m=16, block_size_n=16, block_size_k=16, group_size_m=1)
+    kernel_launch_parameters = KernelLaunchParameters(
+        block_size_m=16, block_size_n=16, block_size_k=16, group_size_m=1
+    )
+
     def run_case(m, two_n, k):
         print(f"M: {m:<6} 2N: {two_n:<6} K: {k:<6}")
-        T_in = torch.randn((m, k), device='cuda', dtype=torch.float16)
-        T_weight = torch.randn((two_n, k), device='cuda', dtype=torch.float16)
-        T_bias = torch.randn((two_n,), device='cuda', dtype=torch.float16)
-        
-        triton_output = transformer_gated_linear_forward(T_in, T_weight, T_bias, kernel_launch_parameters=kernel_launch_parameters)
+        T_in = torch.randn((m, k), device="cuda", dtype=torch.float16)
+        T_weight = torch.randn((two_n, k), device="cuda", dtype=torch.float16)
+        T_bias = torch.randn((two_n,), device="cuda", dtype=torch.float16)
+
+        triton_output = transformer_gated_linear_forward(
+            T_in, T_weight, T_bias, kernel_launch_parameters=kernel_launch_parameters
+        )
         torch_output = T_in.float() @ T_weight.T.float() + T_bias.float()
         x1, x2 = torch_output.chunk(2, dim=(torch_output.ndim - 1))
         expected_torch_output = (x1 * gelu_fast(x2)).half()
         print_is_all_close(triton_output, expected_torch_output)
-        
+
     M = [312, 512, 761, 1000]
     two_N = [312, 512] + [1024, 2048, 4096]
     K = [i for i in range(761, 761 + 65)] + [1024, 2048]
     for m, two_n, k in itertools.product(M, two_N, K):
         run_case(m, two_n, k)
-        
+
+
 if __name__ == "__main__":
     """Test forward kernels."""
     import argparse
+
     parser = argparse.ArgumentParser()
     parser.add_argument("--seed", type=int, default=None)
     args = parser.parse_args()
-    
+
     if args.seed is not None:
         torch.manual_seed(args.seed)
-    
+
     run_test_case_forward()

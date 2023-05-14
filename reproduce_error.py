@@ -1,7 +1,7 @@
 import torch
+import triton.language as tl
 
 import triton
-import triton.language as tl
 
 """
 Modification of the tutorial https://triton-lang.org/main/getting-started/tutorials/03-matrix-multiplication.html
@@ -36,24 +36,42 @@ Gives wrong results even though should be correct results.
         # triton.Config({'BLOCK_SIZE_M': 64, 'BLOCK_SIZE_N': 128, 'BLOCK_SIZE_K': 32, 'GROUP_SIZE_M': 8}, num_stages=4, num_warps=4),
         # triton.Config({'BLOCK_SIZE_M': 128, 'BLOCK_SIZE_N': 32, 'BLOCK_SIZE_K': 32, 'GROUP_SIZE_M': 8}, num_stages=4, num_warps=4),
         # triton.Config({'BLOCK_SIZE_M': 64, 'BLOCK_SIZE_N': 32, 'BLOCK_SIZE_K': 32, 'GROUP_SIZE_M': 8}, num_stages=5, num_warps=2),
-        triton.Config({'BLOCK_SIZE_M': 32, 'BLOCK_SIZE_N': 32, 'BLOCK_SIZE_K': 32, 'GROUP_SIZE_M': 8}, num_stages=5, num_warps=2),
+        triton.Config(
+            {
+                "BLOCK_SIZE_M": 32,
+                "BLOCK_SIZE_N": 32,
+                "BLOCK_SIZE_K": 32,
+                "GROUP_SIZE_M": 8,
+            },
+            num_stages=5,
+            num_warps=2,
+        ),
     ],
-    key=['M', 'N', 'K'],
+    key=["M", "N", "K"],
 )
 @triton.jit
 def matmul_kernel(
     # Pointers to matrices
-    a_ptr, b_ptr, c_ptr,
+    a_ptr,
+    b_ptr,
+    c_ptr,
     # Matrix dimensions
-    M, N, K,
+    M,
+    N,
+    K,
     # The stride variables represent how much to increase the ptr by when moving by 1
     # element in a particular dimension. E.g. `stride_am` is how much to increase `a_ptr`
     # by to get the element one row down (A has M rows).
-    stride_am, stride_ak,
-    stride_bk, stride_bn,
-    stride_cm, stride_cn,
+    stride_am,
+    stride_ak,
+    stride_bk,
+    stride_bn,
+    stride_cm,
+    stride_cn,
     # Meta-parameters
-    BLOCK_SIZE_M: tl.constexpr, BLOCK_SIZE_N: tl.constexpr, BLOCK_SIZE_K: tl.constexpr,
+    BLOCK_SIZE_M: tl.constexpr,
+    BLOCK_SIZE_N: tl.constexpr,
+    BLOCK_SIZE_K: tl.constexpr,
     GROUP_SIZE_M: tl.constexpr,
     ACTIVATION: tl.constexpr,
 ):
@@ -84,7 +102,9 @@ def matmul_kernel(
     offs_am = (pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)) % M
     offs_bn = (pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)) % N
     offs_k = tl.arange(0, BLOCK_SIZE_K)
-    a_ptrs = a_ptr + (offs_k[:, None] * stride_ak + offs_am[None, :] * stride_am) # NOTE: SWAPPED DIMS
+    a_ptrs = a_ptr + (
+        offs_k[:, None] * stride_ak + offs_am[None, :] * stride_am
+    )  # NOTE: SWAPPED DIMS
     b_ptrs = b_ptr + (offs_k[:, None] * stride_bk + offs_bn[None, :] * stride_bn)
 
     # -----------------------------------------------------------
@@ -96,10 +116,12 @@ def matmul_kernel(
     for k in range(0, tl.cdiv(K, BLOCK_SIZE_K)):
         # Load the next block of A and B, generate a mask by checking the K dimension.
         # If it is out of bounds, set it to 0.
-        a = tl.load(a_ptrs, mask=offs_k[:, None] < K - k * BLOCK_SIZE_K, other=0.0) # NOTE: SWAPPED DIMS
+        a = tl.load(
+            a_ptrs, mask=offs_k[:, None] < K - k * BLOCK_SIZE_K, other=0.0
+        )  # NOTE: SWAPPED DIMS
         b = tl.load(b_ptrs, mask=offs_k[:, None] < K - k * BLOCK_SIZE_K, other=0.0)
         # We accumulate along the K dimension.
-        accumulator += tl.dot(a.T, b) # NOTE: SWAPPED DIMS
+        accumulator += tl.dot(a.T, b)  # NOTE: SWAPPED DIMS
         # Advance the ptrs to the next K block.
         a_ptrs += BLOCK_SIZE_K * stride_ak
         b_ptrs += BLOCK_SIZE_K * stride_bk
@@ -124,12 +146,15 @@ def leaky_relu(x):
     x = x + 1
     return tl.where(x >= 0, x, 0.01 * x)
 
+
 def matmul(a, b, activation=""):
     # Check constraints.
-    assert a.shape[0] == b.shape[0], "Incompatible dimensions" # NOTE: updated shape stuff
+    assert (
+        a.shape[0] == b.shape[0]
+    ), "Incompatible dimensions"  # NOTE: updated shape stuff
     assert a.is_contiguous(), "Matrix A must be contiguous"
     assert b.is_contiguous(), "Matrix B must be contiguous"
-    
+
     # NOTE: updated the shape stuff
     K, M = a.shape
     _, N = b.shape
@@ -137,27 +162,35 @@ def matmul(a, b, activation=""):
     c = torch.empty((M, N), device=a.device, dtype=a.dtype)
     # 1D launch kernel where each block gets its own program.
     grid = lambda META: (
-        triton.cdiv(M, META['BLOCK_SIZE_M']) * triton.cdiv(N, META['BLOCK_SIZE_N']),
+        triton.cdiv(M, META["BLOCK_SIZE_M"]) * triton.cdiv(N, META["BLOCK_SIZE_N"]),
     )
     matmul_kernel[grid](
-        a, b, c,
-        M, N, K,
-        a.stride(0), a.stride(1),
-        b.stride(0), b.stride(1),
-        c.stride(0), c.stride(1),
-        ACTIVATION=activation
+        a,
+        b,
+        c,
+        M,
+        N,
+        K,
+        a.stride(0),
+        a.stride(1),
+        b.stride(0),
+        b.stride(1),
+        c.stride(0),
+        c.stride(1),
+        ACTIVATION=activation,
     )
     return c
 
+
 if __name__ == "__main__":
     torch.manual_seed(0)
-    
+
     # NOTE: this is changed to faciliate new shapes
-    a = torch.randn((1, 512), device='cuda', dtype=torch.float16)
-    b = torch.randn((1, 512), device='cuda', dtype=torch.float16)
+    a = torch.randn((1, 512), device="cuda", dtype=torch.float16)
+    b = torch.randn((1, 512), device="cuda", dtype=torch.float16)
     triton_output = matmul(a, b)
     torch_output = torch.matmul(a.T, b)
-    print(f"triton_output={triton_output}") 
+    print(f"triton_output={triton_output}")
     print(f"torch_output={torch_output}")
     if torch.allclose(triton_output, torch_output, atol=1e-2, rtol=0):
         print("✅ Triton and Torch match")
