@@ -173,47 +173,6 @@ def transformer_gated_linear_forward_kernel(
     mask = (offs_out_m[:, None] < M) & (offs_out_n[None, :] < N)
     tl.store(out_ptrs, out, mask=mask)
 
-#### Backwards Kernels
-@triton.jit 
-def transformer_gated_linear_calculate_input_grad(
-    output_grad_ptr, 
-    x_ptr,
-    weight_ptr,
-    # Matrix dimensions
-    M, 
-    two_N,
-    K,
-    stride_in_m, stride_in_k,
-    stride_weight_n, stride_weight_k,
-    stride_bias_n,
-    stride_out_m, stride_out_n,
-    # Meta-parameters
-    ## Shared-Memory Blocking 
-    BLOCK_SIZE_M: tl.constexpr,
-    BLOCK_SIZE_N: tl.constexpr,
-    BLOCK_SIZE_K: tl.constexpr,
-    ## L2 Blocking
-    GROUP_SIZE_M: tl.constexpr,
-):
-    """Calculates the equivalent of the following:
-    
-    T_output_grad   : [M, N]
-    T_x             : [M, 2N]
-    T_weight        : [2N, K]
-    T_out           : [M, N]
-    
-    T_x1 = T_x[M, :N]
-    T_x2 = T_x[M, N:]
-    T_w1 = T_weight[:N, K]
-    T_w2 = T_weight[N:, K]
-    
-    T_out = [output_grad * gelu_fast(x2)] @ w1
-    T_out += [output_grad * derivative_gelu_fast(x2) * x1] @ w2
-    
-    This is done using a similar strategy to the above
-    """
-    pass 
-
 @triton.jit
 def calculate_dual_linear_tile_fused(
     accumulator1,
@@ -233,7 +192,7 @@ def calculate_dual_linear_tile_fused(
     # Block size information
     BLOCK_SIZE_M, BLOCK_SIZE_N, BLOCK_SIZE_K
 ):
-    """Calculates the tile at (pid_tile_m, pid_tile_n)"""
+    """Calculates the tile at (pid_tile_m, pid_tile_n), concurrently finding corresponding elemwise"""
     k_tiles = tl.cdiv(K, BLOCK_SIZE_K)
     offs_in_m = tl.minimum((pid_tile_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)), M - 1)
     offs_weight_n = tl.minimum(pid_tile_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N), N - 1)
@@ -279,10 +238,12 @@ def derivate_fast_gelu_kernel(buffer):
     a = SQRT_2_OVERPI
     b = FAST_GELU_INNER_CONST
     x = buffer
-    return 0.5 * (torch.tanh(a * x * (b * x * x + 1)) + 1) + (
-            0.5 * x * (2 * a * b * x * x + a * (b * x * x + 1)) * (
-                1 / tl.libdevice.cosh(a * x * (b * x * x + 1))
-            ) ** 2
+    return 0.5 * (tl.libdevice.tanh(a * x * (b * x * x + 1)) + 1) + (
+            0.5 * x * (2 * a * b * x * x + a * (b * x * x + 1)) * 
+            tl.libdevice.pow(
+                1 / tl.libdevice.cosh(a * x * (b * x * x + 1)),
+                2
+            )
         )
 
 def print_is_all_close(triton_tensor, torch_tensor, atol=1e-1, rtol=1e-1):

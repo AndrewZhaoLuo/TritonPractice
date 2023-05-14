@@ -1,6 +1,7 @@
 import torch 
 from torch import nn 
-import triton_kernel
+import triton_forward_kernel
+import triton_backward_kernel
 from torch_module import BaseTransformerGatedLinearLayer, gelu_fast, derivative_gelu_fast
 from typing import *
 import numpy as np 
@@ -16,7 +17,7 @@ class TransformerGatedLinearLayerFunction(torch.autograd.Function):
         bias_tensor
     ):
         ctx.save_for_backward(input_tensor, weight_tensor, bias_tensor)
-        return triton_kernel.transformer_gated_linear_forward(
+        return triton_forward_kernel.transformer_gated_linear_forward(
             input_tensor, 
             weight_tensor, 
             bias_tensor
@@ -30,7 +31,7 @@ class TransformerGatedLinearLayerFunction(torch.autograd.Function):
         input_tensor = input_tensor.float()
         weight_tensor = weight_tensor.float()
         
-        x = input_tensor @ weight_tensor.T 
+        x = input_tensor @ weight_tensor.T
         x += bias_tensor
         x1, x2 = x.chunk(2, dim=(x.ndim - 1))
         two_N = weight_tensor.shape[0]
@@ -46,7 +47,15 @@ class TransformerGatedLinearLayerFunction(torch.autograd.Function):
             ], 
             dim=0
         )
-        
+
+        # Bug here? grad_output has .strides() of (0, 0) due to not being contiguous
+        # Make contiguous and it's all ok.
+        grad_output = grad_output.contiguous()
+        weight_grad2 = triton_backward_kernel.transformer_gated_linear_backward_weight_grad(
+            x, input_tensor, grad_output
+        )
+        print(weight_grad2[:16, :16])
+        breakpoint()
 
         # bias calculation
         bias_grad = torch.cat([
