@@ -102,9 +102,7 @@ def matmul_kernel(
     offs_am = (pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)) % M
     offs_bn = (pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)) % N
     offs_k = tl.arange(0, BLOCK_SIZE_K)
-    a_ptrs = a_ptr + (
-        offs_k[:, None] * stride_ak + offs_am[None, :] * stride_am
-    )  # NOTE: SWAPPED DIMS
+    a_ptrs = a_ptr + (offs_k[:, None] * stride_ak + offs_am[None, :] * stride_am)  # NOTE: SWAPPED DIMS
     b_ptrs = b_ptr + (offs_k[:, None] * stride_bk + offs_bn[None, :] * stride_bn)
 
     # -----------------------------------------------------------
@@ -116,9 +114,7 @@ def matmul_kernel(
     for k in range(0, tl.cdiv(K, BLOCK_SIZE_K)):
         # Load the next block of A and B, generate a mask by checking the K dimension.
         # If it is out of bounds, set it to 0.
-        a = tl.load(
-            a_ptrs, mask=offs_k[:, None] < K - k * BLOCK_SIZE_K, other=0.0
-        )  # NOTE: SWAPPED DIMS
+        a = tl.load(a_ptrs, mask=offs_k[:, None] < K - k * BLOCK_SIZE_K, other=0.0)  # NOTE: SWAPPED DIMS
         b = tl.load(b_ptrs, mask=offs_k[:, None] < K - k * BLOCK_SIZE_K, other=0.0)
         # We accumulate along the K dimension.
         accumulator += tl.dot(a.T, b)  # NOTE: SWAPPED DIMS
@@ -149,9 +145,7 @@ def leaky_relu(x):
 
 def matmul(a, b, activation=""):
     # Check constraints.
-    assert (
-        a.shape[0] == b.shape[0]
-    ), "Incompatible dimensions"  # NOTE: updated shape stuff
+    assert a.shape[0] == b.shape[0], "Incompatible dimensions"  # NOTE: updated shape stuff
     assert a.is_contiguous(), "Matrix A must be contiguous"
     assert b.is_contiguous(), "Matrix B must be contiguous"
 
@@ -161,9 +155,7 @@ def matmul(a, b, activation=""):
     # Allocates output.
     c = torch.empty((M, N), device=a.device, dtype=a.dtype)
     # 1D launch kernel where each block gets its own program.
-    grid = lambda META: (
-        triton.cdiv(M, META["BLOCK_SIZE_M"]) * triton.cdiv(N, META["BLOCK_SIZE_N"]),
-    )
+    grid = lambda META: (triton.cdiv(M, META["BLOCK_SIZE_M"]) * triton.cdiv(N, META["BLOCK_SIZE_N"]),)
     matmul_kernel[grid](
         a,
         b,

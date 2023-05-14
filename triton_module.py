@@ -6,17 +6,14 @@ from torch import nn
 
 import triton_backward_kernel
 import triton_forward_kernel
-from torch_module import (BaseTransformerGatedLinearLayer,
-                          derivative_gelu_fast, gelu_fast)
+from torch_module import BaseTransformerGatedLinearLayer, derivative_gelu_fast, gelu_fast
 
 
 class TransformerGatedLinearLayerFunction(torch.autograd.Function):
     @staticmethod
     def forward(ctx, input_tensor, weight_tensor, bias_tensor):
         ctx.save_for_backward(input_tensor, weight_tensor, bias_tensor)
-        return triton_forward_kernel.transformer_gated_linear_forward(
-            input_tensor, weight_tensor, bias_tensor
-        )
+        return triton_forward_kernel.transformer_gated_linear_forward(input_tensor, weight_tensor, bias_tensor)
 
     @staticmethod
     def backward_reference(ctx, grad_output) -> Any:
@@ -51,9 +48,7 @@ class TransformerGatedLinearLayerFunction(torch.autograd.Function):
         )
 
         # input calculation
-        input_grad = (grad_output * gelu_fast(x2)) @ w1 + (
-            grad_output * derivative_gelu_fast(x2) * x1
-        ) @ w2
+        input_grad = (grad_output * gelu_fast(x2)) @ w1 + (grad_output * derivative_gelu_fast(x2) * x1) @ w2
         return input_grad.half(), weight_grad.half(), bias_grad.half()
 
     @staticmethod
@@ -70,11 +65,7 @@ class TransformerGatedLinearLayerFunction(torch.autograd.Function):
 
         # TODO: write fused triton kernels.
         grad_output = grad_output.contiguous()  # otherwise reported strides are 0, 0...
-        weight_grad2 = (
-            triton_backward_kernel.transformer_gated_linear_backward_weight_grad(
-                x, input_tensor, grad_output
-            )
-        )
+        weight_grad2 = triton_backward_kernel.transformer_gated_linear_backward_weight_grad(x, input_tensor, grad_output)
         print(weight_grad2[:16, :16])
         breakpoint()
 
@@ -92,9 +83,7 @@ class OptimizedTransformerGatedLinearLayer(nn.Module):
     ) -> None:
         super().__init__()
 
-        weight = torch.empty(
-            [dimension_in * projection_factor, dimension_in], dtype=dtype
-        )
+        weight = torch.empty([dimension_in * projection_factor, dimension_in], dtype=dtype)
         bias = torch.empty([dimension_in * projection_factor], dtype=dtype)
 
         if weight_init is not None:
@@ -122,9 +111,7 @@ class OptimizedTransformerGatedLinearLayer(nn.Module):
 
 
 def print_is_close(torch_tensor, triton_tensor, rtol=1e-2, atol=1e-1):
-    if np.allclose(
-        torch_tensor.detach().cpu(), triton_tensor.detach().cpu(), rtol=rtol, atol=atol
-    ):
+    if np.allclose(torch_tensor.detach().cpu(), triton_tensor.detach().cpu(), rtol=rtol, atol=atol):
         print("✅ Triton and Torch match")
     else:
         print("❌ Triton and Torch differ")
@@ -153,12 +140,8 @@ if __name__ == "__main__":
 
     for i in range(repeats):
         print(f"******Iteration {i}******")
-        input_tensor = torch.randn(
-            args.batch_size, args.input_dim, dtype=torch.half, requires_grad=True
-        )
-        torch_layer = BaseTransformerGatedLinearLayer(
-            args.input_dim, init_non_zero_bias=True
-        )
+        input_tensor = torch.randn(args.batch_size, args.input_dim, dtype=torch.half, requires_grad=True)
+        torch_layer = BaseTransformerGatedLinearLayer(args.input_dim, init_non_zero_bias=True)
         triton_layer = OptimizedTransformerGatedLinearLayer.from_torch(torch_layer)
 
         input_tensor = input_tensor.to("cuda")
@@ -178,9 +161,7 @@ if __name__ == "__main__":
         print()
 
         print("****Backward****")
-        loss_fn = lambda tensor: torch.sum(
-            tensor
-        )  # (tensor - torch.ones_like(tensor)).pow(2).sum()
+        loss_fn = lambda tensor: torch.sum(tensor)  # (tensor - torch.ones_like(tensor)).pow(2).sum()
         loss_torch = loss_fn(forward_torch)
         loss_triton = loss_fn(forward_triton)
         loss_triton.backward()
@@ -195,13 +176,9 @@ if __name__ == "__main__":
         print()
 
         print("Grad bias: ")
-        print_is_close(
-            torch_layer.linear.bias.grad, triton_layer.bias.grad, atol=0.05, rtol=0.01
-        )
+        print_is_close(torch_layer.linear.bias.grad, triton_layer.bias.grad, atol=0.05, rtol=0.01)
         print()
 
         print("Grad input: ")
-        print_is_close(
-            input_tensor_torch.grad, input_tensor_triton.grad, atol=0.05, rtol=0.01
-        )
+        print_is_close(input_tensor_torch.grad, input_tensor_triton.grad, atol=0.05, rtol=0.01)
         print()

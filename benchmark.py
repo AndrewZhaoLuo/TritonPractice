@@ -21,14 +21,10 @@ def get_module(
     dtype: torch.dtype = torch.half,
 ) -> nn.Module:
     if implementation == "torch":
-        module = BaseTransformerGatedLinearLayer(
-            input_dim, projection_factor=projection_factor, dtype=dtype
-        )
+        module = BaseTransformerGatedLinearLayer(input_dim, projection_factor=projection_factor, dtype=dtype)
     elif implementation == "triton":
         # TODO: fixing this
-        module = BaseTransformerGatedLinearLayer(
-            input_dim, projection_factor=projection_factor, dtype=dtype
-        )
+        module = BaseTransformerGatedLinearLayer(input_dim, projection_factor=projection_factor, dtype=dtype)
         module = OptimizedTransformerGatedLinearLayer.from_torch(module)
     else:
         raise ValueError(f"Unknown implementation {implementation}")
@@ -40,16 +36,12 @@ def is_cuda_oom_err(err: RuntimeError) -> bool:
     return "out of memory" in str(err)
 
 
-def _benchmark_runtime(
-    func: Callable, no_grad: bool = False, warmup: int = 25, rep: int = 100
-):
+def _benchmark_runtime(func: Callable, no_grad: bool = False, warmup: int = 25, rep: int = 100):
     try:
         with ExitStack() as stack:
             if no_grad:
                 stack.enter_context(torch.no_grad())
-            return triton.testing.do_bench(
-                func, percentiles=QUANTILES_TO_REPORT, warmup=warmup, rep=rep
-            )
+            return triton.testing.do_bench(func, percentiles=QUANTILES_TO_REPORT, warmup=warmup, rep=rep)
     except RuntimeError as e:
         if is_cuda_oom_err(e):
             return None
@@ -235,12 +227,8 @@ if __name__ == "__main__":
         for batch_size in batch_sizes
     ]
 
-    benchmark_runtime = triton.testing.perf_report(benchmark_reports_runtime_forward)(
-        benchmark_forward_runtime
-    )
-    benchmark_memory = triton.testing.perf_report(benchmark_reports_memory)(
-        benchmark_forward_memory_usage
-    )
+    benchmark_runtime = triton.testing.perf_report(benchmark_reports_runtime_forward)(benchmark_forward_runtime)
+    benchmark_memory = triton.testing.perf_report(benchmark_reports_memory)(benchmark_forward_memory_usage)
 
     # TODO: needs sudo
     # with triton.testing.set_gpu_clock():
