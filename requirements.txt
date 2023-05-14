@@ -5,4 +5,3 @@ torchaudio==2.0.1+cu118
 matplotlib==3.7.1
 pandas==2.0.1
 
--e git+https://github.com/openai/triton.git@9820899b3845e461d9031dba66062efade65d420a#egg=triton&subdirectory=python

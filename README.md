@@ -1,5 +1,11 @@
 # Writeup
 
+I used python3.9.6
+
+Install deps:
+`python -m pip install -r requirements.txt`
+`python -m pip install --no-deps -r requirements_triton.txt`
+
 ## Analysis of Memory Usage
 ### Forward Pass
 Consider the number of elements in each part of our operation, where `projection_factor=8`. 

@@ -41,7 +41,7 @@ def _benchmark_runtime(func: Callable, no_grad: bool = False, warmup: int = 25, 
         with ExitStack() as stack:
             if no_grad:
                 stack.enter_context(torch.no_grad())
-            return triton.testing.do_bench(func, percentiles=QUANTILES_TO_REPORT, warmup=warmup, rep=rep)
+            return triton.testing.do_bench(func, quantiles=QUANTILES_TO_REPORT, warmup=warmup, rep=rep)
     except RuntimeError as e:
         if is_cuda_oom_err(e):
             return None
@@ -173,7 +173,7 @@ if __name__ == "__main__":
 
     I did: sudo nvidia-smi -ac 7001,1515
     """
-    # Sanity checks:
+    # # Sanity checks:
     # print(benchmark_backward_memory_usage(10240, 4096, "triton"))
     # print(benchmark_backward_memory_usage(10240, 4096, "torch"))
     # print(benchmark_forward_memory_usage(10240, 4096, "triton"))

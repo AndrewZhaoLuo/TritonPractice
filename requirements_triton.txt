@@ -1,0 +1,2 @@
+cmake==3.24.1.1
+-e git+https://github.com/openai/triton.git@9820899b3845e461d9031dba66062efade65d420#egg=triton&subdirectory=python
