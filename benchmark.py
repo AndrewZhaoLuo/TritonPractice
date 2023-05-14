@@ -114,10 +114,15 @@ def benchmark_backward_memory_usage(batch_size: int, input_dim: int, implementat
         raise e
     
 if __name__ == "__main__":
-    """Benchmark implementations.
-    
-    Note before going run the following commands to fix clock speeds (suggest normal baselines):
-        - TODO
+    """
+    Good benchmarking juju:
+        1. Set GPU settings to persist: `nvidia-smi -i 0 -pm ENABLED`
+        2. Get supported clocks: `nvidia-smi -q -d SUPPORTED_CLOCKS`
+        3. Set clock to max memory clock, 70% of gpu clock: sudo nvidia-smi -ac <memory_clock>,<gpu_clock>
+            a. on my system -ac is not supported
+            b. alternative run `sudo nvidia-smi --lock-gpu-clocks=1515` and `sudo nvidia-smi --lock-memory-clocks=7001`
+        
+    I did: sudo nvidia-smi -ac 7001,1515
     """
     print(benchmark_backward_memory_usage(10240, 4096, 'triton'))
     print(benchmark_backward_memory_usage(10240, 4096, 'torch'))
@@ -175,7 +180,5 @@ if __name__ == "__main__":
     
     # TODO: needs sudo
     # with triton.testing.set_gpu_clock():
-    # run manually: sudo nvidia-smi -i 0 --lock-gpu-clocks=1350,1350
-    # Note this also warmups the autotuning cache for runtime
-    # benchmark_memory.run(show_plots=True, print_data=True, save_path='outputs/')
+    benchmark_memory.run(show_plots=True, print_data=True, save_path='outputs/')
     benchmark_runtime.run(show_plots=True, print_data=True, save_path='outputs/')

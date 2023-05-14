@@ -179,3 +179,4 @@ def transformer_gated_linear_backward_kernel_weights(
 
         tl.store(out_ptrs_w1_grad, accumulator_w1_grad, mask=mask)
         tl.store(out_ptrs_w2_grad, accumulator_w2_grad, mask=mask)
+            

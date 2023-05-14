@@ -277,66 +277,14 @@ def run_test_case_forward():
     for m, two_n, k in itertools.product(M, two_N, K):
         run_case(m, two_n, k)
         
-def run_test_case_backward():
-    def run_case(m, two_n, k):
-        print(f"M: {m:<6} 2N: {two_n:<6} K: {k:<6}")
-        T_in = torch.randn((m, k), device='cuda', dtype=torch.float16)
-        T_weight = torch.randn((two_n, k), device='cuda', dtype=torch.float16)
-        T_bias = torch.randn((two_n), device='cuda', dtype=torch.float16)
-        T_dloss_dout = torch.randn((m, two_n // 2), device='cuda', dtype=torch.float16)
-        
-        def get_torch_answer():
-            tensor_in = T_in.float()
-            weight = T_weight.float()
-            bias = T_bias.float()
-            output_grad = T_dloss_dout.float()
-            
-            x = tensor_in @ weight.T + bias
-            x1, x2 = x.chunk(2, dim=(x.ndim - 1))
-            w1, w2 = weight.chunk(2, dim=0)
-
-            # input calculation
-            input_grad = (output_grad * gelu_fast(x2)) @ w1 + (output_grad * derivative_gelu_fast(x2) * x1) @ w2 
-            
-            # weight calculation
-            weight1_grad = tensor_in.T @ (output_grad * gelu_fast(x2))
-            weight2_grad = tensor_in.T @ (output_grad * x1 * derivative_gelu_fast(x2))
-            weight_grad = torch.cat([weight1_grad.T, weight2_grad.T], dim=0)
-            
-            # bias calculation
-            bias1_grad = gelu_fast(x2) * output_grad
-            bias2_grad = x1 * derivative_gelu_fast(x2) * gelu_fast(torch.tensor([1], dtype=x1.dtype, device=x1.device)) * output_grad
-            bias_grad = torch.cat([bias1_grad.sum(0).squeeze() , bias2_grad.sum(0).squeeze()], dim=0)
-            
-            return input_grad.half(), weight_grad.half(), bias_grad.half()
-        
-        torch_grad_input, torch_grad_weight, torch_grad_bias = get_torch_answer()
-        triton_grad_input, triton_grad_weight, triton_grad_bias = torch_grad_input, torch_grad_weight, torch_grad_bias
-        print("Grad input:")
-        print_is_all_close(torch_grad_input, triton_grad_input)
-        print("Grad weight:")
-        print_is_all_close(torch_grad_weight, triton_grad_weight)
-        print("Grad bias:")
-        print_is_all_close(torch_grad_bias, triton_grad_bias)
-    
-    M = [312, 512, 761, 1000]
-    two_N = [312, 512]
-    K = [i for i in range(761, 761 + 65)]
-    for m, two_n, k in itertools.product(M, two_N, K):
-        run_case(m, two_n, k)
-    
 if __name__ == "__main__":
+    """Test forward kernels."""
     import argparse
     parser = argparse.ArgumentParser()
     parser.add_argument("--seed", type=int, default=None)
-    parser.add_argument("--test-case", choices=['forward', 'backward'], required=True)
     args = parser.parse_args()
     
     if args.seed is not None:
         torch.manual_seed(args.seed)
     
-    if args.test_case == 'forward':
-        run_test_case_forward()
-    else:
-        run_test_case_backward()
-
+    run_test_case_forward()

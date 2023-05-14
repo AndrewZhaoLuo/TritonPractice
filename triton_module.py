@@ -24,10 +24,8 @@ class TransformerGatedLinearLayerFunction(torch.autograd.Function):
         )
         
     @staticmethod
-    def backward(ctx, grad_output) -> Any:
-        # TODO: write fused triton kernels.
+    def backward_reference(ctx, grad_output) -> Any:
         input_tensor, weight_tensor, bias_tensor = ctx.saved_tensors
-
         input_tensor = input_tensor.float()
         weight_tensor = weight_tensor.float()
         
@@ -48,15 +46,6 @@ class TransformerGatedLinearLayerFunction(torch.autograd.Function):
             dim=0
         )
 
-        # Bug here? grad_output has .strides() of (0, 0) due to not being contiguous
-        # Make contiguous and it's all ok.
-        grad_output = grad_output.contiguous()
-        weight_grad2 = triton_backward_kernel.transformer_gated_linear_backward_weight_grad(
-            x, input_tensor, grad_output
-        )
-        print(weight_grad2[:16, :16])
-        breakpoint()
-
         # bias calculation
         bias_grad = torch.cat([
                 (gelu_fast(x2) * grad_output).sum(0).squeeze(), 
@@ -68,6 +57,24 @@ class TransformerGatedLinearLayerFunction(torch.autograd.Function):
         # input calculation
         input_grad = (grad_output * gelu_fast(x2)) @ w1 + (grad_output * derivative_gelu_fast(x2) * x1) @ w2 
         return input_grad.half(), weight_grad.half(), bias_grad.half()
+    
+    @staticmethod
+    def backward(ctx, grad_output) -> Any:
+        input_grad, weight_grad, bias_grad = TransformerGatedLinearLayerFunction.backward_reference(ctx, grad_output)
+        input_tensor, weight_tensor, bias_tensor = ctx.saved_tensors
+
+        x = input_tensor @ weight_tensor.T
+        x += bias_tensor
+
+        # TODO: write fused triton kernels.
+        grad_output = grad_output.contiguous() # otherwise reported strides are 0, 0...
+        weight_grad2 = triton_backward_kernel.transformer_gated_linear_backward_weight_grad(
+            x, input_tensor, grad_output
+        )
+        print(weight_grad2[:16, :16])
+        breakpoint()
+
+        return input_grad, weight_grad, bias_grad
         
         
 class OptimizedTransformerGatedLinearLayer(nn.Module):
@@ -106,7 +113,7 @@ def print_is_close(torch_tensor, triton_tensor, rtol=1e-2, atol=1e-1):
         print(triton_tensor.shape)
 
 if __name__ == "__main__":
-    """Example of using module."""
+    """Example of using module, run to match against torch."""
     import argparse
     parser = argparse.ArgumentParser()
     parser.add_argument("--input-dim", type=int, required=True)
