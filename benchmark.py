@@ -169,9 +169,9 @@ if __name__ == "__main__":
         2. Get supported clocks: `nvidia-smi -q -d SUPPORTED_CLOCKS`
         3. Set clock to max memory clock, 70% of gpu clock: sudo nvidia-smi -ac <memory_clock>,<gpu_clock>
             a. on my system -ac is not supported
-            b. alternative run `sudo nvidia-smi --lock-gpu-clocks=1515` and `sudo nvidia-smi --lock-memory-clocks=7001`
+            b. alternative run `sudo nvidia-smi --lock-gpu-clocks=1515` and `sudo nvidia-smi --lock-memory-clocks=5001`
 
-    I did: sudo nvidia-smi -ac 7001,1515
+    I did: sudo nvidia-smi -ac 5001,1515
     """
     # # Sanity checks:
     # print(benchmark_backward_memory_usage(10240, 4096, "triton"))
