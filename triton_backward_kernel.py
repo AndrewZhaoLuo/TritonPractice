@@ -143,54 +143,52 @@ def transformer_gated_linear_backward_kernel_weights(
     pid_tile_N = group_start_pid + (pid % group_size_N)
     pid_tile_n = (pid % num_pid_in_group) // group_size_N
 
-    # DEBUG: remove this when done
-    if pid_tile_N == 0 and pid_tile_n == 0:
-        accumulator_w1_grad = tl.zeros((BLOCK_SIZE_N, BLOCK_SIZE_n), dtype=tl.float32)
-        accumulator_w2_grad = tl.zeros((BLOCK_SIZE_N, BLOCK_SIZE_n), dtype=tl.float32)
+    accumulator_w1_grad = tl.zeros((BLOCK_SIZE_N, BLOCK_SIZE_n), dtype=tl.float32)
+    accumulator_w2_grad = tl.zeros((BLOCK_SIZE_N, BLOCK_SIZE_n), dtype=tl.float32)
 
-        x1_ptr = x_ptr
-        x2_ptr = x_ptr + N * stride_x_N
+    x1_ptr = x_ptr
+    x2_ptr = x_ptr + N * stride_x_N
 
-        offsets_N = tl.minimum(pid_tile_N * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N), N - 1)
-        offsets_n = tl.minimum(pid_tile_n * BLOCK_SIZE_n + tl.arange(0, BLOCK_SIZE_n), n - 1)
-        offsets_M = tl.arange(0, BLOCK_SIZE_M)
+    offsets_N = tl.minimum(pid_tile_N * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N), N - 1)
+    offsets_n = tl.minimum(pid_tile_n * BLOCK_SIZE_n + tl.arange(0, BLOCK_SIZE_n), n - 1)
+    offsets_M = tl.arange(0, BLOCK_SIZE_M)
 
-        x1_load_ptrs = x1_ptr + (offsets_M[:, None] * stride_x_M + offsets_N[None, :] * stride_x_N)
-        x2_load_ptrs = x2_ptr + (offsets_M[:, None] * stride_x_M + offsets_N[None, :] * stride_x_N)
-        grad_output_load_ptrs = grad_output_ptr + (offsets_M[:, None] * stride_grad_output_M + offsets_N[None, :] * stride_grad_output_N)
-        input_tensor_load_ptrs = input_tensor_ptr + (offsets_M[:, None] * stride_input_M + offsets_n[None, :] * stride_input_n)
-        M_tiles = tl.cdiv(M, BLOCK_SIZE_M)
+    x1_load_ptrs = x1_ptr + (offsets_M[:, None] * stride_x_M + offsets_N[None, :] * stride_x_N)
+    x2_load_ptrs = x2_ptr + (offsets_M[:, None] * stride_x_M + offsets_N[None, :] * stride_x_N)
+    grad_output_load_ptrs = grad_output_ptr + (offsets_M[:, None] * stride_grad_output_M + offsets_N[None, :] * stride_grad_output_N)
+    input_tensor_load_ptrs = input_tensor_ptr + (offsets_M[:, None] * stride_input_M + offsets_n[None, :] * stride_input_n)
+    M_tiles = tl.cdiv(M, BLOCK_SIZE_M)
 
-        for tile_M in range(0, M_tiles):
-            bound_M = tl.maximum(0, M - tile_M * BLOCK_SIZE_M)
-            T_x1 = tl.load(x1_load_ptrs, mask=offsets_M[:, None] < bound_M, other=0.0)
-            T_x2 = tl.load(x2_load_ptrs, mask=offsets_M[:, None] < bound_M, other=0.0)
-            T_grad_output = tl.load(grad_output_load_ptrs, mask=offsets_M[:, None] < bound_M, other=0.0)
-            T_input_tensor = tl.load(input_tensor_load_ptrs, mask=offsets_M[:, None] < bound_M, other=0.0)
+    for tile_M in range(0, M_tiles):
+        bound_M = tl.maximum(0, M - tile_M * BLOCK_SIZE_M)
+        T_x1 = tl.load(x1_load_ptrs, mask=offsets_M[:, None] < bound_M, other=0.0)
+        T_x2 = tl.load(x2_load_ptrs, mask=offsets_M[:, None] < bound_M, other=0.0)
+        T_grad_output = tl.load(grad_output_load_ptrs, mask=offsets_M[:, None] < bound_M, other=0.0)
+        T_input_tensor = tl.load(input_tensor_load_ptrs, mask=offsets_M[:, None] < bound_M, other=0.0)
 
-            left_side_w1 = T_grad_output * fast_gelu_kernel(T_x2)
-            left_side_w2 = T_grad_output * T_x1 * derivate_fast_gelu_kernel(T_x2)
-            accumulator_w1_grad += tl.dot(left_side_w1.T, T_input_tensor)
-            accumulator_w2_grad += tl.dot(left_side_w2.T, T_input_tensor)
+        left_side_w1 = T_grad_output * fast_gelu_kernel(T_x2).to(tl.float16)
+        left_side_w2 = T_grad_output * T_x1 * derivate_fast_gelu_kernel(T_x2).to(tl.float16)
+        accumulator_w1_grad += tl.dot(left_side_w1.T, T_input_tensor)
+        accumulator_w2_grad += tl.dot(left_side_w2.T, T_input_tensor)
 
-            x1_load_ptrs += BLOCK_SIZE_M * stride_x_M
-            x2_load_ptrs += BLOCK_SIZE_M * stride_x_M
-            grad_output_load_ptrs += BLOCK_SIZE_M * stride_grad_output_M
-            input_tensor_load_ptrs += BLOCK_SIZE_M * stride_input_M
+        x1_load_ptrs += BLOCK_SIZE_M * stride_x_M
+        x2_load_ptrs += BLOCK_SIZE_M * stride_x_M
+        grad_output_load_ptrs += BLOCK_SIZE_M * stride_grad_output_M
+        input_tensor_load_ptrs += BLOCK_SIZE_M * stride_input_M
 
-        # TODO: parametrize casting to dtype
-        accumulator_w1_grad = accumulator_w1_grad.to(tl.float16)
-        accumulator_w2_grad = accumulator_w2_grad.to(tl.float16)
+    # TODO: parametrize casting to dtype
+    accumulator_w1_grad = accumulator_w1_grad.to(tl.float16)
+    accumulator_w2_grad = accumulator_w2_grad.to(tl.float16)
 
-        offs_out_N = pid_tile_N * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
-        offs_out_n = pid_tile_n * BLOCK_SIZE_n + tl.arange(0, BLOCK_SIZE_n)
+    offs_out_N = pid_tile_N * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
+    offs_out_n = pid_tile_n * BLOCK_SIZE_n + tl.arange(0, BLOCK_SIZE_n)
 
-        out_ptr_w1_grad = weight_grad_ptr
-        out_ptr_w2_grad = weight_grad_ptr + N * stride_weight_grad_N
+    out_ptr_w1_grad = weight_grad_ptr
+    out_ptr_w2_grad = weight_grad_ptr + N * stride_weight_grad_N
 
-        out_ptrs_w1_grad = out_ptr_w1_grad + offs_out_N[:, None] * stride_weight_grad_N + offs_out_n[None, :] * stride_weight_grad_n
-        out_ptrs_w2_grad = out_ptr_w2_grad + offs_out_N[:, None] * stride_weight_grad_N + offs_out_n[None, :] * stride_weight_grad_n
-        mask = (offs_out_N[:, None] < N) & (offs_out_n[None, :] < n)
+    out_ptrs_w1_grad = out_ptr_w1_grad + offs_out_N[:, None] * stride_weight_grad_N + offs_out_n[None, :] * stride_weight_grad_n
+    out_ptrs_w2_grad = out_ptr_w2_grad + offs_out_N[:, None] * stride_weight_grad_N + offs_out_n[None, :] * stride_weight_grad_n
+    mask = (offs_out_N[:, None] < N) & (offs_out_n[None, :] < n)
 
-        tl.store(out_ptrs_w1_grad, accumulator_w1_grad, mask=mask)
-        tl.store(out_ptrs_w2_grad, accumulator_w2_grad, mask=mask)
+    tl.store(out_ptrs_w1_grad, accumulator_w1_grad, mask=mask)
+    tl.store(out_ptrs_w2_grad, accumulator_w2_grad, mask=mask)

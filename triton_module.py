@@ -66,10 +66,8 @@ class TransformerGatedLinearLayerFunction(torch.autograd.Function):
         # TODO: write fused triton kernels.
         grad_output = grad_output.contiguous()  # otherwise reported strides are 0, 0...
         weight_grad2 = triton_backward_kernel.transformer_gated_linear_backward_weight_grad(x, input_tensor, grad_output)
-        print(weight_grad2[:16, :16])
-        breakpoint()
 
-        return input_grad, weight_grad, bias_grad
+        return input_grad, weight_grad2, bias_grad
 
 
 class OptimizedTransformerGatedLinearLayer(nn.Module):
